@@ -54,10 +54,16 @@ fn scrollback_size(config: &Arc<dyn TerminalConfiguration>, allow_scrollback: bo
     }
 }
 
+/// Initial scrollback capacity to allocate (in addition to visible rows).
+/// This provides a reasonable buffer without pre-allocating the full scrollback.
+const INITIAL_SCROLLBACK_CAPACITY: usize = 500;
+
 impl Screen {
     /// Create a new Screen with the specified dimensions.
     /// The Cells in the viewable portion of the screen are set to the
     /// default cell attributes.
+    /// Note: Scrollback memory is allocated incrementally rather than all at once
+    /// to reduce initial memory footprint for long-running sessions.
     pub fn new(
         size: TerminalSize,
         config: &Arc<dyn TerminalConfiguration>,
@@ -68,8 +74,11 @@ impl Screen {
         let physical_rows = size.rows.max(1);
         let physical_cols = size.cols.max(1);
 
-        let mut lines =
-            VecDeque::with_capacity(physical_rows + scrollback_size(config, allow_scrollback));
+        // Only allocate visible rows + initial scrollback buffer instead of full scrollback
+        // This significantly reduces memory usage for new tabs
+        let max_scrollback = scrollback_size(config, allow_scrollback);
+        let initial_capacity = physical_rows + INITIAL_SCROLLBACK_CAPACITY.min(max_scrollback);
+        let mut lines = VecDeque::with_capacity(initial_capacity);
         for _ in 0..physical_rows {
             let mut line = Line::new(seqno);
             bidi_mode.apply_to_line(&mut line, seqno);
@@ -248,10 +257,21 @@ impl Screen {
             (cursor.x, cursor_phys)
         };
 
-        let capacity = physical_rows + self.scrollback_size();
+        // Incremental capacity expansion: only allocate what's needed plus a buffer
+        // instead of pre-allocating full scrollback
+        let max_capacity = physical_rows + self.scrollback_size();
         let current_capacity = self.lines.capacity();
-        if capacity > current_capacity {
-            self.lines.reserve(capacity - current_capacity);
+        let current_len = self.lines.len();
+        // Only expand if we have room to grow and are running low on capacity
+        if current_capacity < max_capacity
+            && current_len >= current_capacity.saturating_sub(INITIAL_SCROLLBACK_CAPACITY / 2)
+        {
+            // Running low on capacity, expand incrementally
+            let expand_by =
+                INITIAL_SCROLLBACK_CAPACITY.min(max_capacity.saturating_sub(current_capacity));
+            if expand_by > 0 {
+                self.lines.reserve(expand_by);
+            }
         }
 
         // If we resized wider and the rewrap resulted in fewer
@@ -602,7 +622,7 @@ impl Screen {
                 for (src_cell, dest_cell) in
                     cells.into_iter().zip(&mut dest_row.cells_mut()[dest_range])
                 {
-                    *dest_cell = src_cell.clone();
+                    *dest_cell = src_cell;
                 }
 
                 dest_row.fill_range(
@@ -871,7 +891,7 @@ impl Screen {
                 for (src_cell, dest_cell) in
                     cells.into_iter().zip(&mut dest_row.cells_mut()[dest_range])
                 {
-                    *dest_cell = src_cell.clone();
+                    *dest_cell = src_cell;
                 }
 
                 dest_row.fill_range(

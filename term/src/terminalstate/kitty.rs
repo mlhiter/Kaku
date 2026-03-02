@@ -43,7 +43,9 @@ impl KittyImageState {
     }
 
     fn prune_unreferenced(&mut self) {
-        let budget = 320 * 1024 * 1024; // FIXME: make this configurable
+        // Reduced from 320MB to 128MB to lower memory footprint.
+        // TODO: make this configurable via TerminalConfiguration
+        let budget = 128 * 1024 * 1024;
         if self.used_memory > budget {
             let referenced: HashSet<u32> = self.placements.keys().map(|(k, _)| *k).collect();
             let target = self.used_memory - budget;
