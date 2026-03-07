@@ -8,11 +8,9 @@ pub struct ThemePalette {
     pub secondary: SrgbaTuple,
     pub accent: SrgbaTuple,
     pub error: SrgbaTuple,
-    pub info: SrgbaTuple,
     pub text: SrgbaTuple,
     pub muted: SrgbaTuple,
     pub bg: SrgbaTuple,
-    pub panel: SrgbaTuple,
     pub is_light: bool,
 }
 
@@ -110,11 +108,9 @@ fn dark_palette() -> ThemePalette {
         secondary: rgb("#61FFCA"),
         accent: rgb("#FFCA85"),
         error: rgb("#FF6767"),
-        info: rgb("#5FA8FF"),
         text: rgb("#EDECEE"),
         muted: rgb("#6D6D6D"),
         bg: rgb("#15141B"),
-        panel: rgb("#1F1D28"),
         is_light: false,
     }
 }
@@ -125,11 +121,9 @@ fn light_palette() -> ThemePalette {
         secondary: rgb("#24837B"),
         accent: rgb("#9A7400"),
         error: rgb("#AF3029"),
-        info: rgb("#205EA6"),
         text: rgb("#403E3C"),
         muted: rgb("#7A7872"),
         bg: rgb("#FFFCF0"),
-        panel: rgb("#FAF7EA"),
         is_light: true,
     }
 }
@@ -195,22 +189,15 @@ fn palette_from_config(config: &ConfigHandle) -> ThemePalette {
             palette.cursor_border,
         ],
     );
-    let info = pick_visible(
-        bg,
-        &[palette.colors.0[12], palette.colors.0[4], palette.cursor_bg],
-    );
     let muted = pick_muted(bg, text, palette.colors.0[8]);
-    let panel = blend(bg, text, if is_light { 0.05 } else { 0.08 });
     ThemePalette {
         primary,
         secondary,
         accent,
         error,
-        info,
         text,
         muted,
         bg,
-        panel,
         is_light,
     }
 }
@@ -234,8 +221,4 @@ fn current_theme() -> CachedTheme {
 
 pub fn current_theme_palette() -> ThemePalette {
     current_theme().palette
-}
-
-pub fn clear_theme_cache() {
-    *THEME_CACHE.lock().unwrap() = None;
 }

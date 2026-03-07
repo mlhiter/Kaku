@@ -34,7 +34,7 @@ fn blend(base: SrgbaTuple, overlay: SrgbaTuple, amount: f32) -> SrgbaTuple {
 
 fn theme_from_palette(palette: &crate::kaku_theme::ThemePalette) -> Theme {
     // Derive panel from bg+text blend so popups have enough contrast vs the
-    // background — same formula as 0.5.1, independent of the opencode theme JSON.
+    // Preserve the existing background formula regardless of external tool integrations.
     let panel_blend = if palette.is_light { 0.05 } else { 0.08 };
     let panel = blend(palette.bg, palette.text, panel_blend);
 
@@ -65,11 +65,6 @@ fn current_theme() -> Theme {
     let theme = theme_from_palette(&palette);
     *cached = Some((generation, theme));
     theme
-}
-
-pub fn clear_theme_cache() {
-    crate::kaku_theme::clear_theme_cache();
-    *THEME_CACHE.lock().unwrap() = None;
 }
 
 pub fn primary() -> Color {
