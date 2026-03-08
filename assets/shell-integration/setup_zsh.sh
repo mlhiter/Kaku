@@ -59,6 +59,10 @@ else
 fi
 
 VENDOR_DIR="$RESOURCES_DIR/vendor"
+# Allow test override so CI can provide stub plugin dirs without real downloads.
+if [[ -n "${KAKU_VENDOR_DIR:-}" && -d "${KAKU_VENDOR_DIR}" ]]; then
+	VENDOR_DIR="${KAKU_VENDOR_DIR}"
+fi
 TOOL_INSTALL_SCRIPT="$SCRIPT_DIR/install_cli_tools.sh"
 if [[ ! -f "$TOOL_INSTALL_SCRIPT" ]]; then
 	TOOL_INSTALL_SCRIPT="$RESOURCES_DIR/install_cli_tools.sh"
