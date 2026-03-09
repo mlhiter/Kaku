@@ -83,6 +83,7 @@ Built-in zsh plugins bundled by default:
 - **zsh-completions**: Extended command and subcommand completion definitions.
 - **Syntax Highlighting**: Real-time command validation and coloring.
 - **Autosuggestions**: Intelligent, history-based completions similar to Fish shell.
+- **Smart Tab**: Only active inside Kaku sessions by default. Set `KAKU_SMART_TAB_DISABLE=1` before sourcing `~/.config/kaku/zsh/kaku.zsh` to keep your own Tab binding everywhere.
 
 Optional CLI tools installed via Homebrew during `kaku init`:
 
