@@ -2805,8 +2805,18 @@ local function is_user_light_theme()
   return false
 end
 
--- Set initial font config based on user's theme setting
-config.font, config.font_rules = build_font_config(is_user_light_theme())
+-- Only seed the managed default font stack when the user hasn't overridden it.
+-- The bundled font_rules are tightly coupled to the bundled JetBrains Mono stack,
+-- so they must not remain active when the user selects a custom primary font.
+do
+  local font, font_rules = build_font_config(is_user_light_theme())
+  if not user_has_custom_font then
+    config.font = font
+  end
+  if not user_has_custom_font and not user_has_custom_font_rules then
+    config.font_rules = font_rules
+  end
+end
 
 -- Track last font theme per window to avoid redundant overrides
 local window_font_theme = setmetatable({}, { __mode = 'k' })
