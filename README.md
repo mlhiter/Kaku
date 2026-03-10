@@ -86,7 +86,7 @@ Built-in zsh plugins bundled by default:
 
 Optional CLI tools installed via Homebrew during `kaku init`:
 
-- **Starship**: A fast, customizable prompt showing git status, package versions, and execution time.
+- **Starship**: A fast, customizable prompt showing the current directory, git branch, and package versions.
 - **Delta**: A syntax-highlighting pager for git, diff, and grep output.
 - **Lazygit**: A terminal UI for fast, visual Git workflows without leaving the shell.
 - **Yazi**: A terminal file manager. Use `y` to launch it and sync the shell directory on exit.

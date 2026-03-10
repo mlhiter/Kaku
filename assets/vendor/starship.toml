@@ -2,7 +2,7 @@
 
 add_newline = false
 command_timeout = 10000
-format = "$directory$git_branch$git_status$package$cmd_duration$character"
+format = "$directory$git_branch$package$character"
 
 [directory]
 truncate_to_repo = true
@@ -16,16 +16,10 @@ error_symbol = " "
 format = "$symbol"
 
 [git_branch]
-format = " on [$symbol$branch(:$remote_branch)]($style)"
-
-[git_status]
-format = "([\\[$all_status$ahead_behind\\]]($style))"
+format = " [$symbol$branch(:$remote_branch)]($style)"
 
 [package]
 format = " is [$symbol$version]($style)"
-
-[cmd_duration]
-format = " took [$duration]($style)"
 
 # Avoid prompt width issues caused by emoji variation selectors (e.g. ☁️)
 # in some shell/font/wcwidth combinations.
