@@ -15,41 +15,82 @@ enum MainLayoutMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FooterCopy {
-    primary_key: &'static str,
-    primary_long: &'static str,
-    primary_short: &'static str,
-    secondary_key: Option<&'static str>,
-    secondary_long: Option<&'static str>,
-    secondary_short: Option<&'static str>,
+struct FooterAction {
+    key: &'static str,
+    long_label: &'static str,
+    short_label: &'static str,
 }
 
-fn footer_copy(mode: Mode) -> FooterCopy {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FooterLabelStyle {
+    Long,
+    Short,
+}
+
+const NORMAL_FOOTER_ACTIONS: [FooterAction; 5] = [
+    FooterAction {
+        key: "↑↓",
+        long_label: "Navigate",
+        short_label: "Move",
+    },
+    FooterAction {
+        key: "Enter",
+        long_label: "Edit",
+        short_label: "Edit",
+    },
+    FooterAction {
+        key: "Esc",
+        long_label: "Save & Exit",
+        short_label: "Save",
+    },
+    FooterAction {
+        key: "Q",
+        long_label: "Discard",
+        short_label: "Discard",
+    },
+    FooterAction {
+        key: "E",
+        long_label: "Open File",
+        short_label: "Open",
+    },
+];
+
+const SELECTING_FOOTER_ACTIONS: [FooterAction; 3] = [
+    FooterAction {
+        key: "↑↓",
+        long_label: "Navigate",
+        short_label: "Move",
+    },
+    FooterAction {
+        key: "Enter",
+        long_label: "Apply",
+        short_label: "Apply",
+    },
+    FooterAction {
+        key: "Esc",
+        long_label: "Save & Exit",
+        short_label: "Save",
+    },
+];
+
+const EDITING_FOOTER_ACTIONS: [FooterAction; 2] = [
+    FooterAction {
+        key: "Enter",
+        long_label: "Apply",
+        short_label: "Apply",
+    },
+    FooterAction {
+        key: "Esc",
+        long_label: "Cancel",
+        short_label: "Cancel",
+    },
+];
+
+fn footer_copy(mode: Mode) -> &'static [FooterAction] {
     match mode {
-        Mode::Normal => FooterCopy {
-            primary_key: "ESC",
-            primary_long: " save and apply changes",
-            primary_short: " apply",
-            secondary_key: Some("Q"),
-            secondary_long: Some(" discard and quit"),
-            secondary_short: Some(" discard"),
-        },
-        Mode::Selecting => FooterCopy {
-            primary_key: "Enter",
-            primary_long: " apply current change",
-            primary_short: " apply",
-            secondary_key: Some("ESC"),
-            secondary_long: Some(" apply & exit"),
-            secondary_short: Some(" apply"),
-        },
-        Mode::Editing => FooterCopy {
-            primary_key: "Enter",
-            primary_long: " apply current change",
-            primary_short: " apply",
-            secondary_key: Some("ESC"),
-            secondary_long: Some(" cancel edit"),
-            secondary_short: Some(" cancel"),
-        },
+        Mode::Normal => &NORMAL_FOOTER_ACTIONS,
+        Mode::Selecting => &SELECTING_FOOTER_ACTIONS,
+        Mode::Editing => &EDITING_FOOTER_ACTIONS,
     }
 }
 
@@ -243,54 +284,67 @@ fn render_fields(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, mode: Mode) {
-    let copy = footer_copy(mode);
-    let line = if area.width >= 44 {
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(copy.primary_key, Style::default().fg(primary())),
-            Span::styled(copy.primary_long, Style::default().fg(muted())),
-            if copy.secondary_key.is_some() || copy.secondary_long.is_some() {
-                Span::styled("  ·  ", Style::default().fg(muted()))
-            } else {
-                Span::raw("")
-            },
-            Span::styled(
-                copy.secondary_key.unwrap_or(""),
-                Style::default().fg(primary()),
-            ),
-            Span::styled(
-                copy.secondary_long.unwrap_or(""),
-                Style::default().fg(muted()),
-            ),
-        ])
-    } else if area.width >= 30 {
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(copy.primary_key, Style::default().fg(primary())),
-            Span::styled(copy.primary_short, Style::default().fg(muted())),
-            if copy.secondary_key.is_some() || copy.secondary_short.is_some() {
-                Span::styled("  ·  ", Style::default().fg(muted()))
-            } else {
-                Span::raw("")
-            },
-            Span::styled(
-                copy.secondary_key.unwrap_or(""),
-                Style::default().fg(primary()),
-            ),
-            Span::styled(
-                copy.secondary_short.unwrap_or(""),
-                Style::default().fg(muted()),
-            ),
-        ])
+    let actions = footer_copy(mode);
+    let label_style = if area.width >= 52 {
+        FooterLabelStyle::Long
     } else {
-        Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(copy.primary_key, Style::default().fg(primary())),
-            Span::styled(copy.primary_short, Style::default().fg(muted())),
-        ])
+        FooterLabelStyle::Short
     };
 
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(
+        Paragraph::new(build_footer_line(actions, label_style, area.width)),
+        area,
+    );
+}
+
+fn build_footer_line(
+    actions: &[FooterAction],
+    label_style: FooterLabelStyle,
+    width: u16,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled("  ", Style::default())];
+    let mut used_width = 2usize;
+    let max_width = width as usize;
+    let separator = " | ";
+
+    for (idx, action) in actions.iter().enumerate() {
+        let label = match label_style {
+            FooterLabelStyle::Long => action.long_label,
+            FooterLabelStyle::Short => action.short_label,
+        };
+        let segment_width = action.key.chars().count() + 1 + label.chars().count();
+        let separator_width = if idx == 0 {
+            0
+        } else {
+            separator.chars().count()
+        };
+
+        if used_width + separator_width + segment_width > max_width {
+            if idx == 0 && label_style == FooterLabelStyle::Long {
+                return build_footer_line(actions, FooterLabelStyle::Short, width);
+            }
+            break;
+        }
+
+        if idx > 0 {
+            spans.push(Span::styled(separator, Style::default().fg(muted())));
+            used_width += separator_width;
+        }
+
+        spans.push(Span::styled(action.key, Style::default().fg(primary())));
+        spans.push(Span::styled(
+            format!(" {}", label),
+            Style::default().fg(muted()),
+        ));
+        used_width += segment_width;
+    }
+
+    if spans.len() == 1 {
+        let action = actions[0];
+        spans.push(Span::styled(action.key, Style::default().fg(primary())));
+    }
+
+    Line::from(spans)
 }
 
 fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -327,9 +381,9 @@ fn render_selector(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled(field.key, Style::default().fg(text_fg())),
             Span::styled("  ", Style::default()),
             Span::styled("Enter", Style::default().fg(primary())),
-            Span::styled(" / ", Style::default().fg(muted())),
+            Span::styled(": Apply  ", Style::default().fg(muted())),
             Span::styled("Esc", Style::default().fg(primary())),
-            Span::styled(": Apply ", Style::default().fg(muted())),
+            Span::styled(": Save & Exit ", Style::default().fg(muted())),
         ]))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(primary()))
@@ -447,7 +501,10 @@ fn render_editor(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{footer_copy, resolve_main_layout, FooterCopy, MainLayoutMode};
+    use super::{
+        build_footer_line, footer_copy, resolve_main_layout, FooterAction, FooterLabelStyle,
+        MainLayoutMode, NORMAL_FOOTER_ACTIONS,
+    };
     use crate::config_tui::Mode;
 
     #[test]
@@ -469,46 +526,53 @@ mod tests {
 
     #[test]
     fn normal_footer_keeps_escape_as_apply_shortcut() {
+        assert_eq!(footer_copy(Mode::Normal), &NORMAL_FOOTER_ACTIONS);
+    }
+
+    #[test]
+    fn normal_footer_shows_open_file_shortcut_last() {
         assert_eq!(
-            footer_copy(Mode::Normal),
-            FooterCopy {
-                primary_key: "ESC",
-                primary_long: " save and apply changes",
-                primary_short: " apply",
-                secondary_key: Some("Q"),
-                secondary_long: Some(" discard and quit"),
-                secondary_short: Some(" discard"),
-            }
+            footer_copy(Mode::Normal).last(),
+            Some(&FooterAction {
+                key: "E",
+                long_label: "Open File",
+                short_label: "Open",
+            })
         );
     }
 
     #[test]
-    fn modal_footer_switches_escape_to_cancel() {
+    fn selecting_footer_switches_escape_to_save_and_exit() {
         assert_eq!(
-            footer_copy(Mode::Selecting),
-            FooterCopy {
-                primary_key: "Enter",
-                primary_long: " apply current change",
-                primary_short: " apply",
-                secondary_key: Some("ESC"),
-                secondary_long: Some(" apply & exit"),
-                secondary_short: Some(" apply"),
-            }
+            footer_text(Mode::Selecting, 80),
+            "  ↑↓ Navigate | Enter Apply | Esc Save & Exit"
         );
     }
 
     #[test]
-    fn modal_footer_shows_cancel_for_editing() {
+    fn editing_footer_uses_compact_labels_on_narrow_widths() {
+        assert_eq!(footer_text(Mode::Editing, 24), "  Enter Apply");
+    }
+
+    #[test]
+    fn normal_footer_matches_ai_style_with_separators() {
         assert_eq!(
-            footer_copy(Mode::Editing),
-            FooterCopy {
-                primary_key: "Enter",
-                primary_long: " apply current change",
-                primary_short: " apply",
-                secondary_key: Some("ESC"),
-                secondary_long: Some(" cancel edit"),
-                secondary_short: Some(" cancel"),
-            }
+            footer_text(Mode::Normal, 90),
+            "  ↑↓ Navigate | Enter Edit | Esc Save & Exit | Q Discard | E Open File"
         );
+    }
+
+    fn footer_text(mode: Mode, width: u16) -> String {
+        let label_style = if width >= 52 {
+            FooterLabelStyle::Long
+        } else {
+            FooterLabelStyle::Short
+        };
+
+        build_footer_line(footer_copy(mode), label_style, width)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 }
