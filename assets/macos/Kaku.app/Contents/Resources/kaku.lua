@@ -2467,13 +2467,49 @@ local function evict_stale_bell_panes(live_pane_ids)
   end
 end
 
+local function tab_pane_keys(tab)
+  local keys = {}
+  if not tab then
+    return keys
+  end
+
+  if type(tab.panes) == 'table' then
+    for _, pane in ipairs(tab.panes) do
+      if pane and pane.pane_id then
+        keys[#keys + 1] = tostring(pane.pane_id)
+      end
+    end
+  end
+
+  if #keys == 0 and tab.active_pane and tab.active_pane.pane_id then
+    keys[1] = tostring(tab.active_pane.pane_id)
+  end
+
+  return keys
+end
+
+local function tab_has_bell(tab)
+  for _, pane_key in ipairs(tab_pane_keys(tab)) do
+    if _bell_panes[pane_key] then
+      return true
+    end
+  end
+  return false
+end
+
+local function clear_tab_bells(tab)
+  for _, pane_key in ipairs(tab_pane_keys(tab)) do
+    _bell_panes[pane_key] = nil
+  end
+end
+
 wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, max_width)
   -- Evict stale cache only on the first tab to avoid O(n²) across the render cycle
   if tab.tab_index == 0 then
     local live_pane_ids = {}
     for _, t in ipairs(tabs) do
-      if t.active_pane then
-        live_pane_ids[tostring(t.active_pane.pane_id)] = true
+      for _, pane_key in ipairs(tab_pane_keys(t)) do
+        live_pane_ids[pane_key] = true
       end
     end
     evict_stale_cache(live_pane_ids)
@@ -2520,21 +2556,22 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
     fg = tab.is_active and KAKU_WHITE or (hover and KAKU_WHITE or KAKU_GRAY)
   end
 
+  local has_bell = tab_has_bell(tab)
+  if has_bell and tab.is_active then
+    clear_tab_bells(tab)
+    has_bell = false
+  end
+
   -- Bell-based prefix indicator: show ● only when a BEL was received,
-  -- clear when the tab becomes active (user has seen the notification).
-  local pane_key = active_pane and tostring(active_pane.pane_id) or nil
-  if pane_key and _bell_panes[pane_key] then
-    if tab.is_active then
-      _bell_panes[pane_key] = nil
-    else
-      return {
-        { Attribute = { Intensity = intensity } },
-        { Foreground = { Color = KAKU_ORANGE } },
-        { Text = ' ● ' },
-        { Foreground = { Color = fg } },
-        { Text = text .. ' ' },
-      }
-    end
+  -- and honor the standard bell_tab_indicator toggle from user config.
+  if has_bell and effective_config.bell_tab_indicator ~= false then
+    return {
+      { Attribute = { Intensity = intensity } },
+      { Foreground = { Color = KAKU_ORANGE } },
+      { Text = ' ● ' },
+      { Foreground = { Color = fg } },
+      { Text = text .. ' ' },
+    }
   end
 
   return {
@@ -3005,7 +3042,6 @@ config.pane_close_confirmation = false
 config.enable_tab_bar = true
 config.tab_bar_at_bottom = true
 config.use_fancy_tab_bar = false
-config.bell_tab_indicator = false
 config.tab_max_width = 32
 config.hide_tab_bar_if_only_one_tab = true
 config.show_tab_index_in_tab_bar = true

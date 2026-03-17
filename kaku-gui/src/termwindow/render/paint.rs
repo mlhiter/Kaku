@@ -12,7 +12,6 @@ use ::window::WindowOps;
 use anyhow::Context;
 use config::Dimension;
 use smol::Timer;
-use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use wezterm_font::ClearShapeCache;
 use window::color::LinearRgba;
@@ -639,83 +638,10 @@ impl crate::TermWindow {
     /// Draw a dot on inactive tabs that have panes with unread bell events.
     fn paint_tab_bell_indicators(
         &mut self,
-        layers: &mut crate::quad::TripleLayerQuadAllocator,
+        _layers: &mut crate::quad::TripleLayerQuadAllocator,
     ) -> anyhow::Result<()> {
-        use crate::tabbar::TabBarItem;
-
-        // Fast path: skip mux lock entirely if no panes have unread bells
-        if !self.config.bell_tab_indicator
-            || !self.pane_state.borrow().values().any(|s| s.has_unread_bell)
-        {
-            return Ok(());
-        }
-
-        // Figure out which tab indices have unread bell panes
-        let mux = mux::Mux::get();
-        let mux_window = match mux.get_window(self.mux_window_id) {
-            Some(w) => w,
-            None => return Ok(()),
-        };
-        let active_tab_idx = mux_window.get_active_idx();
-
-        let mut tabs_with_bell: HashSet<usize> = HashSet::new();
-        for (idx, tab) in mux_window.iter().enumerate() {
-            if idx == active_tab_idx {
-                continue; // skip active tab
-            }
-            let panes = tab.iter_panes_ignoring_zoom();
-            for pos in &panes {
-                if self.pane_state(pos.pane.pane_id()).has_unread_bell {
-                    tabs_with_bell.insert(idx);
-                    break;
-                }
-            }
-        }
-
-        if tabs_with_bell.is_empty() {
-            return Ok(());
-        }
-
-        let notif_color = self.palette().cursor_bg.to_linear().mul_alpha(0.9);
-
-        static CIRCLE_POLY: &[Poly] = &[Poly {
-            path: &[PolyCommand::Circle {
-                center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-                radius: BlockCoord::Frac(1, 2),
-            }],
-            intensity: BlockAlpha::Full,
-            style: PolyStyle::Fill,
-        }];
-
-        const DOT_RIGHT_MARGIN: f32 = 3.0;
-
-        for ui_item in &self.ui_items {
-            if let crate::termwindow::UIItemType::TabBar(TabBarItem::Tab {
-                tab_idx,
-                active: false,
-            }) = &ui_item.item_type
-            {
-                if tabs_with_bell.contains(tab_idx) {
-                    // Draw dot at the right side of the tab, vertically centered
-                    let dot_x =
-                        (ui_item.x + ui_item.width) as f32 - STATUS_DOT_SIZE - DOT_RIGHT_MARGIN;
-                    let dot_y = ui_item.y as f32
-                        + ((ui_item.height as f32 - STATUS_DOT_SIZE) / 2.0).round();
-
-                    self.poly_quad(
-                        layers,
-                        2,
-                        euclid::point2(dot_x, dot_y),
-                        CIRCLE_POLY,
-                        1,
-                        euclid::size2(STATUS_DOT_SIZE, STATUS_DOT_SIZE),
-                        notif_color,
-                    )
-                    .context("tab bell indicator")?;
-                }
-            }
-        }
-
+        // Kaku renders unread bell state inline in the bundled format-tab-title
+        // callback, so the core tab-dot painter would be redundant.
         Ok(())
     }
 
