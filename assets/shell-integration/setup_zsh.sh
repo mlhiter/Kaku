@@ -1248,12 +1248,7 @@ fi
 # Set KAKU_SSH_SKIP_1PASSWORD_FIX=1 to disable the 1Password behavior.
 # Guard: only define if no existing ssh function is present, so user-defined
 # wrappers (e.g. from fzf-ssh, autossh plugins) are not silently replaced.
-if ! typeset -f ssh > /dev/null 2>&1; then
-    # Remove any existing alias to allow function definition
-    if alias ssh > /dev/null 2>&1; then
-        unalias ssh
-    fi
-ssh() {
+_kaku_wrapped_ssh() {
     local -a extra_opts=()
 
     # 1Password SSH agent fix: auto-add IdentitiesOnly=yes to prevent
@@ -1277,6 +1272,37 @@ ssh() {
     else
         command ssh "\${extra_opts[@]}" "\$@"
     fi
+}
+if (( \$+aliases[ssh] )); then
+    typeset _kaku_existing_ssh_alias="\${aliases[ssh]}"
+    function ssh {
+        local -a extra_opts=()
+        local -a _kaku_alias_words
+
+        if [[ -z "\${KAKU_SSH_SKIP_1PASSWORD_FIX-}" ]]; then
+            local sock="\${SSH_AUTH_SOCK:-}"
+            if [[ "\$sock" == *1password* || "\$sock" == *2BUA8C4S2C* ]]; then
+                local has_identitiesonly=false prev=""
+                for arg in "\$@"; do
+                    [[ "\$prev" == "-o" && "\$arg" == IdentitiesOnly=* ]] && has_identitiesonly=true
+                    [[ "\$arg" == -oIdentitiesOnly=* ]] && has_identitiesonly=true
+                    prev="\$arg"
+                done
+                \$has_identitiesonly || extra_opts+=(-o "IdentitiesOnly=yes")
+            fi
+        fi
+
+        _kaku_alias_words=(\${(z)_kaku_existing_ssh_alias})
+        if [[ "\$TERM" == "kaku" ]]; then
+            TERM=xterm-256color "\${_kaku_alias_words[@]}" "\${extra_opts[@]}" "\$@"
+        else
+            "\${_kaku_alias_words[@]}" "\${extra_opts[@]}" "\$@"
+        fi
+    }
+    unalias ssh
+elif ! typeset -f ssh > /dev/null 2>&1; then
+function ssh {
+    _kaku_wrapped_ssh "\$@"
 }
 fi
 

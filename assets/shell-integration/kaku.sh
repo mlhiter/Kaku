@@ -43,17 +43,29 @@ esac
 # Override TERM for ssh sessions the same way Kaku's built-in SSH domain does.
 # Set KAKU_SSH_SKIP_TERM_FIX=1 to disable. If the user already defined ssh(),
 # keep their function untouched.
-if ! typeset -f ssh >/dev/null 2>&1; then
-    # Remove any existing alias to allow function definition
-    if alias ssh > /dev/null 2>&1; then
-        unalias ssh
-    fi
-  ssh() {
+_kaku_wrapped_ssh() {
     if [[ -z "${KAKU_SSH_SKIP_TERM_FIX-}" && "${TERM:-}" == "kaku" ]]; then
       TERM=xterm-256color command ssh "$@"
     else
       command ssh "$@"
     fi
+  }
+
+if [ -n "${ZSH_NAME-}" ] && alias ssh >/dev/null 2>&1; then
+  _kaku_existing_ssh_alias="${aliases[ssh]-}"
+  function ssh {
+    local -a _kaku_alias_words
+    _kaku_alias_words=(${(z)_kaku_existing_ssh_alias})
+    if [[ -z "${KAKU_SSH_SKIP_TERM_FIX-}" && "${TERM:-}" == "kaku" ]]; then
+      TERM=xterm-256color "${_kaku_alias_words[@]}" "$@"
+    else
+      "${_kaku_alias_words[@]}" "$@"
+    fi
+  }
+  unalias ssh
+elif ! typeset -f ssh >/dev/null 2>&1; then
+  function ssh {
+    _kaku_wrapped_ssh "$@"
   }
 fi
 
