@@ -72,6 +72,9 @@ pub enum Clipboard {
 pub enum ClipboardData {
     Text(String),
     Files(Vec<PathBuf>),
+    /// Clipboard contains an image (PNG/TIFF). The path points to a temp file
+    /// written by the clipboard backend. Do not paste this as text.
+    Image(std::path::PathBuf),
 }
 
 impl Default for Clipboard {

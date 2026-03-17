@@ -210,7 +210,7 @@ impl Clipboard {
 
         if let Some((image_data, extension)) = self.read_image_data()? {
             let path = self.write_image_to_runtime_dir(&image_data, extension)?;
-            return Ok(ClipboardData::Files(vec![path]));
+            return Ok(ClipboardData::Image(path));
         }
 
         anyhow::bail!("pasteboard read returned empty");
@@ -219,6 +219,7 @@ impl Clipboard {
     pub fn read(&self) -> anyhow::Result<String> {
         match self.read_data()? {
             ClipboardData::Text(text) => Ok(text),
+            ClipboardData::Image(_) => Ok(String::new()),
             ClipboardData::Files(paths) => {
                 let quoted = paths
                     .iter()

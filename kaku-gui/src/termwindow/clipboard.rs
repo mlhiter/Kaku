@@ -168,7 +168,13 @@ impl TermWindow {
         promise::spawn::spawn(async move {
             match future.await {
                 Ok(data) => {
-                    window.notify(TermWindowNotif::Apply(Box::new(move |_myself| {
+                    window.notify(TermWindowNotif::Apply(Box::new(move |myself| {
+                        if let window::ClipboardData::Image(_) = &data {
+                            myself.show_toast(
+                                "Image in clipboard — use Ctrl+V to paste images".to_string(),
+                            );
+                            return;
+                        }
                         let clip = match data_to_paste_string(data, quote_dropped_files) {
                             Some(clip) => clip,
                             None => return,
@@ -200,6 +206,7 @@ fn data_to_paste_string(
 ) -> Option<String> {
     match data {
         ClipboardData::Text(text) => Some(text),
+        ClipboardData::Image(_) => None,
         ClipboardData::Files(paths) => {
             if paths.is_empty() {
                 return None;
