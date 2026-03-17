@@ -598,7 +598,9 @@ impl FishConfigCheck {
         if self.active_lines > 0 {
             details.push(format!("Active Kaku source lines: {}", self.active_lines));
         } else {
-            details.push("Expected an active line that sources ~/.config/kaku/fish/kaku.fish".to_string());
+            details.push(
+                "Expected an active line that sources ~/.config/kaku/fish/kaku.fish".to_string(),
+            );
         }
         details
     }
@@ -632,7 +634,8 @@ fn check_fish_config_line(config_path: &Path) -> FishConfigCheck {
 }
 
 fn detect_target_shell() -> KakuShell {
-    if let Some(shell) = std::env::var("KAKU_TARGET_SHELL").ok()
+    if let Some(shell) = std::env::var("KAKU_TARGET_SHELL")
+        .ok()
         .filter(|shell| !shell.trim().is_empty())
     {
         return shell_from_candidate_path(&shell);

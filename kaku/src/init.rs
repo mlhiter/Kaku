@@ -39,15 +39,16 @@ mod imp {
 
         install_kaku_wrapper(shell).context("install kaku wrapper")?;
 
-        let script = resolve_setup_script(shell)
-            .ok_or_else(|| anyhow!("failed to locate {} for Kaku initialization", shell.setup_script_name()))?;
+        let script = resolve_setup_script(shell).ok_or_else(|| {
+            anyhow!(
+                "failed to locate {} for Kaku initialization",
+                shell.setup_script_name()
+            )
+        })?;
 
         let mut cmd = Command::new("/bin/bash");
         cmd.arg(&script).env("KAKU_INIT_INTERNAL", "1");
-        cmd.env(
-            "KAKU_TARGET_SHELL",
-            shell.wrapper_dir(),
-        );
+        cmd.env("KAKU_TARGET_SHELL", shell.wrapper_dir());
         if update_only {
             cmd.arg("--update-only");
         }
@@ -97,10 +98,12 @@ mod imp {
     }
 
     fn parse_shell_env(var: &str) -> Option<KakuShell> {
-        std::env::var_os(var).and_then(sanitize_shell_name).map(|shell| match shell.as_str() {
-            "fish" => KakuShell::Fish,
-            _ => KakuShell::Zsh,
-        })
+        std::env::var_os(var)
+            .and_then(sanitize_shell_name)
+            .map(|shell| match shell.as_str() {
+                "fish" => KakuShell::Fish,
+                _ => KakuShell::Zsh,
+            })
     }
 
     fn sanitize_shell_name(shell: OsString) -> Option<String> {
@@ -235,12 +238,7 @@ exit 127
             }
         }
 
-        candidates.push(
-            config::HOME_DIR
-                .join(".config")
-                .join("kaku")
-                .join(script),
-        );
+        candidates.push(config::HOME_DIR.join(".config").join("kaku").join(script));
         candidates.push(PathBuf::from(format!(
             "/Applications/Kaku.app/Contents/Resources/{}",
             script

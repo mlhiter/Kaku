@@ -141,7 +141,11 @@ mod imp {
         println!("\n⚠️  Shell restart required.");
         println!(
             "ℹ️  Tools preserved in ~/.config/kaku/{}/\n",
-            if active_shell == KakuShell::Fish { "fish" } else { "zsh" }
+            if active_shell == KakuShell::Fish {
+                "fish"
+            } else {
+                "zsh"
+            }
         );
 
         if !yes && io::stdin().is_terminal() {
@@ -162,11 +166,17 @@ mod imp {
                 bail!("failed to restart shell: {}", err);
             } else {
                 let shell_label = shell_exec_label(active_shell);
-                println!("\nRun '{} -l' when ready. Restore with 'kaku init'", shell_label);
+                println!(
+                    "\nRun '{} -l' when ready. Restore with 'kaku init'",
+                    shell_label
+                );
             }
         } else {
             let shell_label = shell_exec_label(active_shell);
-            println!("Run '{} -l' to restart. Restore with 'kaku init'", shell_label);
+            println!(
+                "Run '{} -l' to restart. Restore with 'kaku init'",
+                shell_label
+            );
         }
 
         Ok(())
@@ -325,11 +335,7 @@ mod imp {
         )?;
 
         let fish_init = config_home().join("fish").join("kaku.fish");
-        remove_file_if_exists(
-            fish_init,
-            "removed ~/.config/kaku/fish/kaku.fish",
-            report,
-        )?;
+        remove_file_if_exists(fish_init, "removed ~/.config/kaku/fish/kaku.fish", report)?;
 
         let fish_wrapper = config_home().join("fish").join("bin").join("kaku");
         remove_file_if_exists(
