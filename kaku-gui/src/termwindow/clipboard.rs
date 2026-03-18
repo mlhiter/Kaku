@@ -1,5 +1,5 @@
-use crate::termwindow::TermWindowNotif;
 use crate::TermWindow;
+use crate::termwindow::TermWindowNotif;
 use config::keyassignment::{ClipboardCopyDestination, ClipboardPasteSource};
 use mux::pane::Pane;
 use smol::Timer;
@@ -90,7 +90,7 @@ impl TermWindow {
 
     /// Show toast notification with a message (disappears after 2.5 seconds).
     /// Rapid consecutive calls are safe: each toast stores its creation `Instant`,
-    /// so only the matching toast is cleared — newer toasts naturally supersede older ones.
+    /// so only the matching toast is cleared, and newer toasts naturally supersede older ones.
     pub fn show_toast(&mut self, message: String) {
         self.show_toast_internal(message, Duration::from_millis(2500));
     }
@@ -133,7 +133,7 @@ impl TermWindow {
             self.show_toast_for(normalized, lifetime_ms);
             return;
         }
-        persistent_toast_notification("Kaku AI", &normalized);
+        persistent_toast_notification("AI", &normalized);
     }
 
     /// Show "Copied" toast notification
@@ -168,11 +168,21 @@ impl TermWindow {
         promise::spawn::spawn(async move {
             match future.await {
                 Ok(data) => {
-                    window.notify(TermWindowNotif::Apply(Box::new(move |myself| {
+                    window.notify(TermWindowNotif::Apply(Box::new(move |_myself| {
                         if let window::ClipboardData::Image(_) = &data {
-                            myself.show_toast(
-                                "Image in clipboard — use Ctrl+V to paste images".to_string(),
-                            );
+                            // Clipboard holds an image, not text.  Instead of
+                            // pasting the temp-file path (which confuses TUI
+                            // apps), forward a Ctrl+V byte so the TUI app can
+                            // read the system clipboard image itself, using the same
+                            // path that a real Ctrl+V keypress takes.
+                            for pane in &targets {
+                                if let Err(err) = pane.writer().write_all(b"\x16") {
+                                    log::warn!(
+                                        "failed to send ctrl-v for image paste to pane {}: {err:#}",
+                                        pane.pane_id()
+                                    );
+                                }
+                            }
                             return;
                         }
                         let clip = match data_to_paste_string(data, quote_dropped_files) {
