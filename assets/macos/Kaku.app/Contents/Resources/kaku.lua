@@ -2570,7 +2570,7 @@ wezterm.on('format-tab-title', function(tab, tabs, _, effective_config, hover, m
       { Foreground = { Color = fg } },
       { Text = ' ' .. text .. ' ' },
       { Foreground = { Color = KAKU_PURPLE } },
-      { Text = '● ' },
+      { Text = '• ' },
     }
   end
 
@@ -3604,7 +3604,7 @@ config.mouse_bindings = {
   {
     event = { Up = { streak = 1, button = 'Left' } },
     mods = 'NONE',
-    action = wezterm.action.CompleteSelectionOrOpenLinkAtMouseCursor('ClipboardAndPrimarySelection'),
+    action = wezterm.action.CompleteSelection('ClipboardAndPrimarySelection'),
   },
   {
     event = { Up = { streak = 1, button = 'Left' } },

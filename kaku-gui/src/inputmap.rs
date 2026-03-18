@@ -181,7 +181,7 @@ impl InputMap {
                         streak: 1,
                         button: MouseButton::Left
                     },
-                    CompleteSelectionOrOpenLinkAtMouseCursor(
+                    CompleteSelection(
                         ClipboardCopyDestination::ClipboardAndPrimarySelection
                     )
                 ],
@@ -195,7 +195,7 @@ impl InputMap {
                         streak: 1,
                         button: MouseButton::Left
                     },
-                    CompleteSelectionOrOpenLinkAtMouseCursor(
+                    CompleteSelection(
                         ClipboardCopyDestination::ClipboardAndPrimarySelection
                     )
                 ],
@@ -233,7 +233,7 @@ impl InputMap {
                         streak: 1,
                         button: MouseButton::Left
                     },
-                    CompleteSelectionOrOpenLinkAtMouseCursor(
+                    CompleteSelection(
                         ClipboardCopyDestination::PrimarySelection
                     )
                 ],
