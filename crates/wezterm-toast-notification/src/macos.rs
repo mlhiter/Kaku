@@ -5,8 +5,8 @@ use crate::ToastNotification;
 use block2::{Block, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{AllocAnyThread, define_class, msg_send};
-use objc2_foundation::{NSArray, NSBundle, NSDictionary, NSError, NSSet, NSString, ns_string};
+use objc2::{define_class, msg_send, AllocAnyThread};
+use objc2_foundation::{ns_string, NSArray, NSBundle, NSDictionary, NSError, NSSet, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
     UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,

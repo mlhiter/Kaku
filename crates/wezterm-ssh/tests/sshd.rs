@@ -351,7 +351,9 @@ impl Sshd {
             .arg("-E")
             .arg(log_path.as_ref())
             .spawn()
-            .map_err(|e| std::io::Error::other(format!("spawning {} failed {:#}", BIN_PATH_STR, e)))?;
+            .map_err(|e| {
+                std::io::Error::other(format!("spawning {} failed {:#}", BIN_PATH_STR, e))
+            })?;
 
         for _ in 0..10 {
             // Wait until the port is up

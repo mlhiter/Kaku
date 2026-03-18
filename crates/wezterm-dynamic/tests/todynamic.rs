@@ -113,7 +113,7 @@ enum Named {
 
 #[test]
 fn named_variants() {
-        assert_eq!(
+    assert_eq!(
         Named::A {
             enabled: true,
             bar: false

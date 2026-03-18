@@ -698,21 +698,20 @@ pub(crate) async fn hydrate_lines(
         if let Some(data) = data_by_hash.get(&im.data_hash) {
             if let Some(line) = line_by_idx.get_mut(&im.line_idx) {
                 if let Some(cell) = line.cells_mut_for_attr_changes_only().get_mut(im.cell_idx) {
-                    cell.attrs_mut()
-                        .attach_image(ImageCell::with_z_index(
-                            im.top_left,
-                            im.bottom_right,
-                            Arc::clone(data),
-                            im.z_index,
-                            (
-                                im.padding_left,
-                                im.padding_top,
-                                im.padding_right,
-                                im.padding_bottom,
-                            ),
-                            im.image_id,
-                            im.placement_id,
-                        ));
+                    cell.attrs_mut().attach_image(ImageCell::with_z_index(
+                        im.top_left,
+                        im.bottom_right,
+                        Arc::clone(data),
+                        im.z_index,
+                        (
+                            im.padding_left,
+                            im.padding_top,
+                            im.padding_right,
+                            im.padding_bottom,
+                        ),
+                        im.image_id,
+                        im.placement_id,
+                    ));
                 }
             }
         }

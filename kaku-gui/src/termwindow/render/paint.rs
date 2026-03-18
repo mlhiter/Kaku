@@ -23,7 +23,7 @@ pub enum AllowImage {
     No,
 }
 
-const STATUS_DOT_SIZE: f32 = 12.0;
+const STATUS_DOT_SIZE: f32 = 14.0;
 const BROADCAST_ICON_SIZE: f32 = 24.0;
 
 static ACTIVE_PANE_INDICATOR_POLY: &[Poly] = &[Poly {
