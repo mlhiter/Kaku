@@ -950,8 +950,67 @@ pub struct Config {
 
     #[dynamic(default = "default_ulimit_nproc")]
     pub ulimit_nproc: u64,
+
+    /// Configuration for the Kaku Remote iOS bridge.
+    /// When enabled, a WebSocket server is started so the iOS app can
+    /// view and control panes over the local network.
+    #[dynamic(default)]
+    pub remote: RemoteConfig,
 }
 impl_lua_conversion_dynamic!(Config);
+
+#[derive(Debug, Clone, FromDynamic, ToDynamic, ConfigMeta)]
+pub struct RemoteConfig {
+    /// Whether the remote bridge is enabled.
+    #[dynamic(default = "default_remote_enabled")]
+    pub enabled: bool,
+
+    /// The TCP port to listen on.
+    #[dynamic(default = "default_remote_port")]
+    pub port: u16,
+
+    /// The address to bind. Use "0.0.0.0" for all interfaces (LAN access)
+    /// or "127.0.0.1" for local-only.
+    #[dynamic(default = "default_remote_bind")]
+    pub bind: String,
+
+    /// Enable outbound relay tunnel so the phone can connect from outside LAN.
+    #[dynamic(default)]
+    pub tunnel: bool,
+
+    /// Relay server WebSocket URL.
+    #[dynamic(default = "default_tunnel_url")]
+    pub tunnel_url: String,
+}
+impl_lua_conversion_dynamic!(RemoteConfig);
+
+fn default_remote_enabled() -> bool {
+    true
+}
+
+fn default_remote_port() -> u16 {
+    9988
+}
+
+fn default_remote_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_tunnel_url() -> String {
+    "wss://kaku-relay.fly.dev".to_string()
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_remote_port(),
+            bind: default_remote_bind(),
+            tunnel: false,
+            tunnel_url: default_tunnel_url(),
+        }
+    }
+}
 
 fn default_one() -> usize {
     1

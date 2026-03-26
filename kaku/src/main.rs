@@ -162,6 +162,9 @@ enum SubCommand {
     )]
     SetCwd(SetCwdCommand),
 
+    #[command(name = "remote", about = "Show QR code to connect Kaku iOS app")]
+    Remote,
+
     /// Generate shell completion information
     #[command(name = "shell-completion", hide = true)]
     ShellCompletion {
@@ -324,6 +327,17 @@ fn run() -> anyhow::Result<()> {
         SubCommand::Cli(cli) => {
             env_bootstrap::bootstrap();
             cli::run_cli(&opts, cli)
+        }
+        SubCommand::Remote => {
+            let state = kaku_remote::read_state()?;
+            let output = if let Some(relay) = &state.tunnel_relay {
+                kaku_remote::render_relay_qr_terminal(relay, &state.token)
+            } else {
+                let host = lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+                kaku_remote::render_qr_terminal(&host, state.port, &state.token)
+            };
+            println!("{output}");
+            Ok(())
         }
         SubCommand::SetCwd(cmd) => cmd.run(),
         SubCommand::ShellCompletion { shell } => {
@@ -611,4 +625,11 @@ fn resolve_gui_executable(exe_name: &str) -> anyhow::Result<PathBuf> {
         .into_iter()
         .next()
         .ok_or_else(|| anyhow!("unable to resolve GUI executable path"))
+}
+
+fn lan_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    Some(sock.local_addr().ok()?.ip().to_string())
 }

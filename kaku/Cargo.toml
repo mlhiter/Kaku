@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+kaku-remote.workspace = true
 base64.workspace = true
 chrono.workspace = true
 clap.workspace = true

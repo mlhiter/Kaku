@@ -349,6 +349,8 @@ async fn async_run_terminal_gui(
         log::warn!("{:#}", err);
     }
 
+    kaku_remote::start();
+
     let default_domain_is_local = Mux::get().default_domain().domain_name() == "local";
     if default_domain_is_local {
         promise::spawn::spawn_with_low_priority(async {

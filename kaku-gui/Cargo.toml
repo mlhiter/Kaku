@@ -62,6 +62,7 @@ log.workspace = true
 luahelper.workspace = true
 metrics.workspace = true
 mlua = {workspace=true, features=["send", "serialize"]}
+kaku-remote.workspace = true
 mux-lua.workspace = true
 mux.workspace = true
 nucleo-matcher.workspace = true
