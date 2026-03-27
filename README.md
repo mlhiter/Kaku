@@ -35,101 +35,34 @@
 
 ## Usage Guide
 
-Kaku comes with intuitive macOS-native shortcuts:
-
 | Action | Shortcut |
 | :--- | :--- |
-| Toggle Global Window | `Cmd + Opt + Ctrl + K` |
 | New Tab | `Cmd + T` |
 | New Window | `Cmd + N` |
 | Close Tab/Pane | `Cmd + W` |
-| Navigate Tabs | `Cmd + Shift + [`, `Cmd + Shift + ]` or `Cmd + 1-9` |
+| Navigate Tabs | `Cmd + Shift + [` / `]` or `Cmd + 1–9` |
 | Navigate Panes | `Cmd + Opt + Arrows` |
 | Split Pane Vertical | `Cmd + D` |
 | Split Pane Horizontal | `Cmd + Shift + D` |
-| Toggle Split Direction | `Cmd + Shift + S` |
-| Zoom/Unzoom Pane | `Cmd + Shift + Enter` |
-| Resize Pane | `Cmd + Ctrl + Arrows` |
 | Open Settings Panel | `Cmd + ,` |
-| Reopen Closed Tab | `Cmd + Shift + T` |
-| Rename Tab | Double-click on tab title |
-| Clear Screen | `Cmd + K` |
-| Doctor Panel | `Ctrl + Shift + L` |
 | AI Panel | `Cmd + Shift + A` |
-| Kaku Assistant Apply Suggestion | `Cmd + Shift + E` |
+| Apply AI Suggestion | `Cmd + Shift + E` |
 | Open Lazygit | `Cmd + Shift + G` |
 | Yazi File Manager | `Cmd + Shift + Y` or `y` |
-| Font Size | `Cmd + +`, `Cmd + -`, `Cmd + 0` |
-| Smart Jump | `z <dir>` |
-| Smart Select | `z -l <dir>` |
-| Recent Dirs | `z -t` |
+| Clear Screen | `Cmd + K` |
 
-## Configuration
-
-Kaku comes with a carefully curated shell stack for immediate productivity, so you can focus on AI coding without opening vscode:
-
-Built-in shell stack defaults are:
-
-- **z**: A smarter cd command that learns your most used directories for instant navigation.
-- **zsh-completions**: Extended command and subcommand completion definitions.
-- **Syntax Highlighting**: Real-time command validation and coloring.
-- **Autosuggestions**: Intelligent, history-based completions similar to Fish shell.
-- **Fish-friendly integration**: `kaku init` now can provision `~/.config/kaku/fish/kaku.fish` for fish users, and `kaku doctor` verifies both zsh/fish integration paths.
-
-Optional CLI tools installed via Homebrew during `kaku init`:
-
-- **Starship**: A fast, customizable prompt showing the current directory, git branch, and package versions.
-- **Delta**: A syntax-highlighting pager for git, diff, and grep output.
-- **Lazygit**: A terminal UI for fast, visual Git workflows without leaving the shell.
-- **Yazi**: A terminal file manager. Use `y` to launch it and sync the shell directory on exit.
-
-Kaku uses `~/.config/kaku/kaku.lua` for configuration, fully compatible with WezTerm's Lua API, with built-in defaults at `Kaku.app/Contents/Resources/kaku.lua` as fallback.
-
-Run `kaku config` or press `Cmd + ,` to open the Settings TUI and edit common options (font, theme, opacity, bells, scrollbars, Kaku Assistant) without manually editing config files. The settings panel uses grouped sections with a pinned footer showing contextual key hints.
-
-To enable rounded scrollbars, open `kaku config` and toggle the scrollbar style option.
-
-If you already use your own Zsh completion workflow such as `fzf-tab`, Kaku's Smart Tab only applies inside Kaku sessions by default. You can also disable it explicitly before loading Kaku shell integration:
-
-```zsh
-export KAKU_SMART_TAB_DISABLE=1
-[[ ":$PATH:" != *":$HOME/.config/kaku/zsh/bin:"* ]] && export PATH="$HOME/.config/kaku/zsh/bin:$PATH"
-[[ -f "$HOME/.config/kaku/zsh/kaku.zsh" ]] && source "$HOME/.config/kaku/zsh/kaku.zsh"
-```
-
-```fish
-set -gx KAKU_SMART_TAB_DISABLE 1
-if not contains -- "$HOME/.config/kaku/fish/bin" $PATH
-  set -gx PATH "$HOME/.config/kaku/fish/bin" $PATH
-end
-if test -f "$HOME/.config/kaku/fish/kaku.fish"
-  source "$HOME/.config/kaku/fish/kaku.fish"
-fi
-```
-
-You can also remap true-color output from specific apps to keep theme consistency:
-
-```lua
-config.color_overrides = {
-  ['#6E6E6E'] = '#3A3942',
-}
-```
-
-Run `kaku` in your terminal to see all available commands such as `kaku ai`, `kaku config`, `kaku doctor`, `kaku update`, and `kaku reset`.
+Full keybinding reference: [docs/keybindings.md](docs/keybindings.md)
 
 ## Kaku AI
 
 Kaku includes a built-in assistant for command-line error recovery and a single AI settings page for coding tools.
 
-- **Kaku Assistant**: Automatically analyzes failed commands and prepares a safe command suggestion. Enable or disable it from `kaku config`.
-- **AI Tools Config**: Manage settings for tools like Claude Code, Codex, Gemini CLI, Copilot CLI, Kimi Code, Factory Droid, and OpenClaw.
+- **Kaku Assistant**: Automatically analyzes failed commands and suggests a safe fix. Press `Cmd + Shift + E` to apply. Enable or disable it from `kaku ai`.
+- **AI Tools Config**: Manage settings for Claude Code, Codex, Gemini CLI, Copilot CLI, Kimi Code, and more.
 
-Open AI settings with `kaku ai` to configure your external AI tools and edit **Kaku Assistant** details after it is enabled.
-For enterprise gateway/proxy headers, edit `~/.config/kaku/assistant.toml` and set `custom_headers` there.
+Tip: DeepSeek-V3.2 via VivGrid is a great low-cost option to start with for everyday AI coding tasks.
 
-Tip: DeepSeek-V3.2 is a great low-cost option to start with for everyday AI coding tasks.
-
-When Kaku Assistant has a suggestion ready after a command error, press `Cmd + Shift + E` to apply it.
+Full AI assistant docs: [docs/features.md](docs/features.md)
 
 ## Why Kaku?
 
@@ -154,54 +87,21 @@ Achieved through aggressive stripping of unused features, lazy loading of color 
 
 ## FAQ
 
-1. **Is there a Windows or Linux version?**
+**Is there a Windows or Linux version?** Not currently. Kaku is macOS-only for now.
 
-   Not at the moment. Kaku is currently macOS-only while we focus on polishing the macOS experience. Windows and Linux versions may come later once the macOS version is mature.
+**Can I use transparent windows?** Yes — set `config.window_background_opacity` in `~/.config/kaku/kaku.lua`.
 
-2. **Can Kaku use transparent windows on macOS?**
+**The `kaku` command is missing.** Run `/Applications/Kaku.app/Contents/MacOS/kaku init --update-only && exec zsh -l`, then `kaku doctor`.
 
-   Yes. You can set `window_background_opacity` and optionally `macos_window_background_blur` in `~/.config/kaku/kaku.lua`. Transparent mode now keeps top/right/bottom padding regions visually consistent to avoid transparent gaps.
+Full FAQ: [docs/faq.md](docs/faq.md)
 
-3. **How do I turn off copy on select?**
+## Docs
 
-   Kaku enables copy on select by default; to disable automatic clipboard copy and copy toast after selection, add `config.copy_on_select = false` to `~/.config/kaku/kaku.lua`.
-
-4. **Can I control working directory inheritance separately for new window, tab, and split?**
-
-   Yes. Use these options in `~/.config/kaku/kaku.lua`:
-   `config.window_inherit_working_directory`
-   `config.tab_inherit_working_directory`
-   `config.split_pane_inherit_working_directory`
-   All are enabled by default.
-
-5. **The `kaku` command is missing. How can I recover it and troubleshoot with Kaku Doctor?**
-
-   Open Kaku Doctor from the Shell menu first. This diagnostic path can still run when your shell command entry is missing and will tell you what to repair.
-
-   Then run this command in a terminal to restore the shell entry:
-
-   ```bash
-   /Applications/Kaku.app/Contents/MacOS/kaku init --update-only
-   exec zsh -l
-   ```
-
-   Finally run `kaku doctor` in your terminal to verify everything is healthy.
-
-6. **How can I use Kaku's CLI capabilities (like `split-pane`) from other scripts or tools?**
-
-   Kaku exposes a powerful CLI for interacting with its multiplexer. For example, to split the current pane, run:
-
-   ```bash
-   kaku cli split-pane
-   ```
-
-   To split it and run a specific command instead of your default shell:
-
-   ```bash
-   kaku cli split-pane -- bash -c "echo Hello"
-   ```
-
-   You can explore all available CLI commands by running `kaku cli --help` or specifically `kaku cli split-pane --help`. This is very useful when integrating Kaku with workflows or AI tools.
+- [Keybindings](docs/keybindings.md) — full shortcut reference
+- [Features](docs/features.md) — AI assistant, lazygit, yazi, remote files, shell suite
+- [Configuration](docs/configuration.md) — themes, fonts, custom keybindings, Lua API
+- [CLI Reference](docs/cli.md) — `kaku ai`, `kaku config`, `kaku doctor`, and more
+- [FAQ](docs/faq.md) — common questions and troubleshooting
 
 ## Contributors
 
@@ -217,7 +117,7 @@ Big thanks to all contributors who helped build Kaku. Go follow them! ❤️
 - Got ideas or found bugs? Open an issue/PR or check [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 - Like Kaku? <a href="https://miaoyan.app/cats.html?name=Kaku" target="_blank">Buy Tw93 a Coke</a> to support the project! 🥤 Supporters below.
 
-<a href="https://miaoyan.app/cats.html?name=Kaku"><img src="https://miaoyan.app/assets/sponsors.svg" width="1000" loading="lazy" /></a>
+<a href="https://miaoyan.app/cats.html?name=Kaku"><img src="https://rawcdn.githack.com/tw93/MiaoYan/vercel/assets/sponsors.svg" width="1000" loading="lazy" /></a>
 
 ## License
 
