@@ -1,0 +1,390 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		17939043042D908D1E61A8CA /* ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 784196A060C6680EF593AF22 /* ConnectionView.swift */; };
+		3B3B22FEF39606EDC8000877 /* TerminalInputAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = D27861770175068C2A5D5644 /* TerminalInputAccessory.swift */; };
+		4ECD117BA5EA4A67342F3640 /* JetBrainsMonoNerdFont-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = ACE243F7083226F5F4CE6929 /* JetBrainsMonoNerdFont-Regular.ttf */; };
+		54598D0E6285ED97967D6677 /* KakuWebSocketClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39A7B233CF25DBF248B8CBEF /* KakuWebSocketClient.swift */; };
+		6421C77B51695DA0107A9782 /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 954D6F755523F80D0D5B4201 /* TerminalView.swift */; };
+		6D45FA2FE7926A7D4F72AEBF /* PaneListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB100511F271EAB2B09E93E7 /* PaneListView.swift */; };
+		BC5D0F0835AF05069EF30C69 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = 436292868A23407D6C978F92 /* SwiftTerm */; };
+		D34CB06D60862527B8E3346C /* KakuTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C42613382853522F6A1F9743 /* KakuTheme.swift */; };
+		D518F612FB34AC5020178B2A /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2559CE4FEAF9F73473A6DF93 /* QRScannerView.swift */; };
+		E699C458F4EF7AFC45B6BB7C /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06B27C7BD15190BCE4076E4E /* App.swift */; };
+		F483BA22CEF5FE1EE7CE463A /* SessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B35BA8F39E30D9E5E2EF4A3 /* SessionView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		06B27C7BD15190BCE4076E4E /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		2559CE4FEAF9F73473A6DF93 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRScannerView.swift; sourceTree = "<group>"; };
+		39A7B233CF25DBF248B8CBEF /* KakuWebSocketClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KakuWebSocketClient.swift; sourceTree = "<group>"; };
+		784196A060C6680EF593AF22 /* ConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionView.swift; sourceTree = "<group>"; };
+		7C351D2653AACC0BFC21B04C /* Kaku.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kaku.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8B35BA8F39E30D9E5E2EF4A3 /* SessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionView.swift; sourceTree = "<group>"; };
+		954D6F755523F80D0D5B4201 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
+		ACE243F7083226F5F4CE6929 /* JetBrainsMonoNerdFont-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "JetBrainsMonoNerdFont-Regular.ttf"; sourceTree = "<group>"; };
+		C42613382853522F6A1F9743 /* KakuTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KakuTheme.swift; sourceTree = "<group>"; };
+		D27861770175068C2A5D5644 /* TerminalInputAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalInputAccessory.swift; sourceTree = "<group>"; };
+		EB100511F271EAB2B09E93E7 /* PaneListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaneListView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C15D5797270CD65F9133E3D0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BC5D0F0835AF05069EF30C69 /* SwiftTerm in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		48922E37283AF9F15036696E /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				ACE243F7083226F5F4CE6929 /* JetBrainsMonoNerdFont-Regular.ttf */,
+			);
+			path = Fonts;
+			sourceTree = "<group>";
+		};
+		5390936C599214AC1564DA1B /* Kaku */ = {
+			isa = PBXGroup;
+			children = (
+				06B27C7BD15190BCE4076E4E /* App.swift */,
+				784196A060C6680EF593AF22 /* ConnectionView.swift */,
+				C42613382853522F6A1F9743 /* KakuTheme.swift */,
+				39A7B233CF25DBF248B8CBEF /* KakuWebSocketClient.swift */,
+				EB100511F271EAB2B09E93E7 /* PaneListView.swift */,
+				2559CE4FEAF9F73473A6DF93 /* QRScannerView.swift */,
+				8B35BA8F39E30D9E5E2EF4A3 /* SessionView.swift */,
+				D27861770175068C2A5D5644 /* TerminalInputAccessory.swift */,
+				954D6F755523F80D0D5B4201 /* TerminalView.swift */,
+			);
+			name = Kaku;
+			path = Sources/Kaku;
+			sourceTree = "<group>";
+		};
+		7D704E5EA225EDD8AAAAA333 = {
+			isa = PBXGroup;
+			children = (
+				5390936C599214AC1564DA1B /* Kaku */,
+				E8643723E0DC8F290755A791 /* Resources */,
+				C3B16BF90E2CED4A511DA09D /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C3B16BF90E2CED4A511DA09D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				7C351D2653AACC0BFC21B04C /* Kaku.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E8643723E0DC8F290755A791 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				48922E37283AF9F15036696E /* Fonts */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		106FD1884D1F395A74B8ED5F /* Kaku */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BF7C2E2267B479D5F5DDF904 /* Build configuration list for PBXNativeTarget "Kaku" */;
+			buildPhases = (
+				3D6183E9BA79EF554613111E /* Sources */,
+				ABCC583BF88533B2FCBF3ED3 /* Resources */,
+				C15D5797270CD65F9133E3D0 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Kaku;
+			packageProductDependencies = (
+				436292868A23407D6C978F92 /* SwiftTerm */,
+			);
+			productName = Kaku;
+			productReference = 7C351D2653AACC0BFC21B04C /* Kaku.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		478F29F0CCD582E45E3A1235 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = B1829F2DDBF022579843B4F6 /* Build configuration list for PBXProject "Kaku" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 7D704E5EA225EDD8AAAAA333;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				C9420B627F43FF6ED03B539C /* XCRemoteSwiftPackageReference "SwiftTerm" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = C3B16BF90E2CED4A511DA09D /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				106FD1884D1F395A74B8ED5F /* Kaku */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		ABCC583BF88533B2FCBF3ED3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4ECD117BA5EA4A67342F3640 /* JetBrainsMonoNerdFont-Regular.ttf in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		3D6183E9BA79EF554613111E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E699C458F4EF7AFC45B6BB7C /* App.swift in Sources */,
+				17939043042D908D1E61A8CA /* ConnectionView.swift in Sources */,
+				D34CB06D60862527B8E3346C /* KakuTheme.swift in Sources */,
+				54598D0E6285ED97967D6677 /* KakuWebSocketClient.swift in Sources */,
+				6D45FA2FE7926A7D4F72AEBF /* PaneListView.swift in Sources */,
+				D518F612FB34AC5020178B2A /* QRScannerView.swift in Sources */,
+				F483BA22CEF5FE1EE7CE463A /* SessionView.swift in Sources */,
+				3B3B22FEF39606EDC8000877 /* TerminalInputAccessory.swift in Sources */,
+				6421C77B51695DA0107A9782 /* TerminalView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		01364B5D2683CAD1892D0823 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		75EFCB67762D5847CA75ADF3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5EH69Y5X38;
+				INFOPLIST_FILE = Kaku/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kaku.app;
+				PRODUCT_NAME = Kaku;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		8A0F466F2F8C8CE8223C6379 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 5EH69Y5X38;
+				INFOPLIST_FILE = Kaku/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kaku.app;
+				PRODUCT_NAME = Kaku;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.9;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		D8692CB8F890EB325E813B48 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		B1829F2DDBF022579843B4F6 /* Build configuration list for PBXProject "Kaku" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				01364B5D2683CAD1892D0823 /* Debug */,
+				D8692CB8F890EB325E813B48 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BF7C2E2267B479D5F5DDF904 /* Build configuration list for PBXNativeTarget "Kaku" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				75EFCB67762D5847CA75ADF3 /* Debug */,
+				8A0F466F2F8C8CE8223C6379 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C9420B627F43FF6ED03B539C /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.2.3;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		436292868A23407D6C978F92 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C9420B627F43FF6ED03B539C /* XCRemoteSwiftPackageReference "SwiftTerm" */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 478F29F0CCD582E45E3A1235 /* Project object */;
+}

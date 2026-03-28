@@ -1,0 +1,55 @@
+name: Kaku
+options:
+  bundleIdPrefix: com.kaku
+  deploymentTarget:
+    iOS: "16.0"
+  defaultConfig: Debug
+  xcodeVersion: "16"
+
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    from: 1.2.3
+
+targets:
+  Kaku:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/Kaku
+        excludes:
+          - Info.plist
+      - path: Resources
+    resources:
+      - path: Resources/Fonts
+        type: folder
+    dependencies:
+      - package: SwiftTerm
+    info:
+      path: Kaku/Info.plist
+      properties:
+        CFBundleDisplayName: Kaku
+        UILaunchStoryboardName: LaunchScreen
+        UIAppFonts:
+          - JetBrainsMonoNerdFont-Regular.ttf
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSCameraUsageDescription: 扫描 Kaku 桌面显示的二维码以自动填入连接信息
+        NSLocalNetworkUsageDescription: 连接同一局域网内的 Kaku 终端
+        NSBonjourServices:
+          - _kaku-remote._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kaku.app
+        PRODUCT_NAME: Kaku
+        SWIFT_VERSION: "5.9"
+        INFOPLIST_FILE: Kaku/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
