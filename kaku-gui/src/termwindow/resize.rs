@@ -378,7 +378,8 @@ impl super::TermWindow {
                 pixel_max: size.pixel_height as f32,
                 pixel_cell: self.render_metrics.cell_size.height as f32,
             };
-            let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
+            let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize
+                + self.sidebar_reserved_width_px();
             let (padding_top, padding_bottom) = effective_vertical_padding_with_policy(
                 config,
                 v_context,
@@ -430,7 +431,8 @@ impl super::TermWindow {
                 pixel_max: self.terminal_size.pixel_height as f32,
                 pixel_cell: self.render_metrics.cell_size.height as f32,
             };
-            let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
+            let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize
+                + self.sidebar_reserved_width_px();
             let (mut padding_top, padding_bottom) = effective_vertical_padding_with_policy(
                 config,
                 v_context,
@@ -755,7 +757,8 @@ impl super::TermWindow {
             pixel_max: self.dimensions.pixel_height as f32,
             pixel_cell: render_metrics.cell_size.height as f32,
         };
-        let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize;
+        let padding_left = config.window_padding.left.evaluate_as_pixels(h_context) as usize
+            + self.sidebar_reserved_width_px();
         let (padding_top, padding_bottom) = effective_vertical_padding(
             config,
             v_context,

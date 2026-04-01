@@ -1,7 +1,8 @@
 use crate::tabbar::TabBarItem;
 use crate::termwindow::tab_rename::TabRenameModal;
 use crate::termwindow::{
-    GuiWin, MouseCapture, PositionedSplit, ScrollHit, TermWindowNotif, UIItem, UIItemType, TMB,
+    GuiWin, MouseCapture, PositionedSplit, ScrollHit, SidebarAction, TermWindowNotif, UIItem,
+    UIItemType, TMB,
 };
 use ::window::{
     MouseButtons as WMB, MouseCursor, MouseEvent, MouseEventKind as WMEK, MousePress, WindowOps,
@@ -198,7 +199,10 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_) => {}
+            | UIItemType::Split(_)
+            | UIItemType::SidebarAction(_)
+            | UIItemType::SidebarResizeHandle
+            | UIItemType::SidebarPanel => {}
         }
     }
 
@@ -209,7 +213,10 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_) => {}
+            | UIItemType::Split(_)
+            | UIItemType::SidebarAction(_)
+            | UIItemType::SidebarResizeHandle
+            | UIItemType::SidebarPanel => {}
         }
     }
 
@@ -351,18 +358,28 @@ impl super::TermWindow {
                         return;
                     }
                 }
-                if press == &MousePress::Left && self.dragging.take().is_some() {
-                    // Completed a split drag: notify PTY of final sizes
-                    // using the tab_id captured at drag start.
-                    if let Some(state) = self.split_drag_state.take() {
-                        let mux = Mux::get();
-                        if let Some(tab) = mux.get_tab(state.tab_id) {
-                            tab.flush_pane_pty_sizes();
-                            context.invalidate();
+                if press == &MousePress::Left {
+                    if let Some((drag_item, _)) = self.dragging.take() {
+                        match drag_item.item_type {
+                            UIItemType::SidebarResizeHandle => {
+                                self.sidebar_persist_width_px();
+                                context.invalidate();
+                            }
+                            _ => {
+                                // Completed a split drag: notify PTY of final sizes
+                                // using the tab_id captured at drag start.
+                                if let Some(state) = self.split_drag_state.take() {
+                                    let mux = Mux::get();
+                                    if let Some(tab) = mux.get_tab(state.tab_id) {
+                                        tab.flush_pane_pty_sizes();
+                                        context.invalidate();
+                                    }
+                                }
+                            }
                         }
+                        self.finish_mouse_release(*press);
+                        return;
                     }
-                    self.finish_mouse_release(*press);
-                    return;
                 }
                 if press == &MousePress::Left && self.tab_drag_state.take().is_some() {
                     self.finish_mouse_release(*press);
@@ -716,10 +733,36 @@ impl super::TermWindow {
             UIItemType::ScrollThumb => {
                 self.drag_scroll_thumb(item, start_event, event, context);
             }
+            UIItemType::SidebarResizeHandle => {
+                self.drag_sidebar_resize(item, start_event, event, context);
+            }
             _ => {
                 log::error!("drag not implemented for {:?}", item);
             }
         }
+    }
+
+    fn drag_sidebar_resize(
+        &mut self,
+        item: UIItem,
+        start_event: MouseEvent,
+        event: MouseEvent,
+        context: &dyn WindowOps,
+    ) {
+        if event.mouse_buttons != WMB::LEFT {
+            return;
+        }
+
+        if self.sidebar_resize_from_drag(start_event.coords.x, event.coords.x) {
+            if let Some(window) = self.window.clone() {
+                let dimensions = self.dimensions;
+                self.apply_dimensions(&dimensions, None, &window, true);
+            }
+            context.invalidate();
+        }
+
+        context.set_cursor(Some(MouseCursor::SizeLeftRight));
+        self.dragging.replace((item, start_event));
     }
 
     fn mouse_event_ui_item(
@@ -750,7 +793,71 @@ impl super::TermWindow {
             UIItemType::CloseTab(idx) => {
                 self.mouse_event_close_tab(idx, event, context);
             }
+            UIItemType::SidebarAction(action) => {
+                self.mouse_event_sidebar_action(action, event, context);
+            }
+            UIItemType::SidebarResizeHandle => {
+                self.mouse_event_sidebar_resize_handle(item, event, context);
+            }
+            UIItemType::SidebarPanel => {
+                self.mouse_event_sidebar_panel(event, context);
+            }
         }
+    }
+
+    pub fn mouse_event_sidebar_action(
+        &mut self,
+        action: SidebarAction,
+        event: MouseEvent,
+        context: &dyn WindowOps,
+    ) {
+        match event.kind {
+            WMEK::Press(MousePress::Left) => {
+                if let Err(err) = self.perform_workspace_sidebar_action(action) {
+                    log::warn!("workspace sidebar action failed: {:#}", err);
+                }
+                context.invalidate();
+            }
+            WMEK::Move => {
+                context.set_cursor(Some(MouseCursor::Hand));
+            }
+            _ => {
+                context.set_cursor(Some(MouseCursor::Arrow));
+            }
+        }
+    }
+
+    pub fn mouse_event_sidebar_resize_handle(
+        &mut self,
+        item: UIItem,
+        event: MouseEvent,
+        context: &dyn WindowOps,
+    ) {
+        match event.kind {
+            WMEK::Press(MousePress::Left) => {
+                self.dragging.replace((item, event));
+                context.set_cursor(Some(MouseCursor::SizeLeftRight));
+            }
+            WMEK::Move => {
+                context.set_cursor(Some(MouseCursor::SizeLeftRight));
+            }
+            _ => {
+                context.set_cursor(Some(MouseCursor::Arrow));
+            }
+        }
+    }
+
+    pub fn mouse_event_sidebar_panel(&mut self, event: MouseEvent, context: &dyn WindowOps) {
+        if let WMEK::Press(MousePress::Left) = event.kind {
+            if let Some(action) = self.workspace_sidebar_action_at(event.coords.x, event.coords.y) {
+                if let Err(err) = self.perform_workspace_sidebar_action(action) {
+                    log::warn!("workspace sidebar panel action failed: {:#}", err);
+                }
+                context.invalidate();
+                return;
+            }
+        }
+        context.set_cursor(Some(MouseCursor::Arrow));
     }
 
     pub fn mouse_event_close_tab(

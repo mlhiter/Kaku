@@ -55,7 +55,7 @@ use mux_lua::MuxPane;
 use smol::channel::Sender;
 use smol::Timer;
 use std::cell::{RefCell, RefMut};
-use std::collections::{HashMap, LinkedList};
+use std::collections::{HashMap, LinkedList, VecDeque};
 use std::ops::Add;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -543,6 +543,26 @@ pub enum TermWindowNotif {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SidebarAction {
+    ActivateSession {
+        project_id: String,
+        session_id: String,
+    },
+    TogglePin {
+        project_id: String,
+        session_id: String,
+        pinned: bool,
+    },
+    CloseOthers {
+        project_id: String,
+        session_id: String,
+    },
+    CloseAll {
+        project_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UIItemType {
     TabBar(TabBarItem),
     CloseTab(usize),
@@ -550,6 +570,9 @@ pub enum UIItemType {
     ScrollThumb,
     BelowScrollThumb,
     Split(PositionedSplit),
+    SidebarAction(SidebarAction),
+    SidebarResizeHandle,
+    SidebarPanel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -786,6 +809,46 @@ pub(crate) enum LineEditorSelectionState {
     Unknown,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceSidebarSession {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub pinned: bool,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceSidebarProject {
+    pub id: String,
+    pub name: String,
+    pub root_path: String,
+    pub sessions: Vec<WorkspaceSidebarSession>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceSidebarState {
+    pub projects: Vec<WorkspaceSidebarProject>,
+    pub last_loaded_at: Option<Instant>,
+    pub last_load_error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkspaceSidebarActionHit {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+    pub action: SidebarAction,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceSidebarPendingOpen {
+    pub project_id: String,
+    pub session_id: String,
+    pub session_title: String,
+}
+
 pub struct TermWindow {
     pub window: Option<Window>,
     pub config: ConfigHandle,
@@ -877,6 +940,12 @@ pub struct TermWindow {
     dragging: Option<(UIItem, MouseEvent)>,
     split_drag_state: Option<SplitDragState>,
     tab_drag_state: Option<TabDragState>,
+    workspace_sidebar: WorkspaceSidebarState,
+    workspace_sidebar_width_px: usize,
+    workspace_sidebar_action_hits: Vec<WorkspaceSidebarActionHit>,
+    workspace_sidebar_pending_opens: VecDeque<WorkspaceSidebarPendingOpen>,
+    workspace_sidebar_tab_to_session: HashMap<TabId, (String, String)>,
+    workspace_sidebar_session_to_tab: HashMap<String, TabId>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -1452,6 +1521,12 @@ impl TermWindow {
             dragging: None,
             split_drag_state: None,
             tab_drag_state: None,
+            workspace_sidebar: WorkspaceSidebarState::default(),
+            workspace_sidebar_width_px: render::sidebar::load_persisted_sidebar_width_px(),
+            workspace_sidebar_action_hits: Vec::new(),
+            workspace_sidebar_pending_opens: VecDeque::new(),
+            workspace_sidebar_tab_to_session: HashMap::new(),
+            workspace_sidebar_session_to_tab: HashMap::new(),
             last_ui_item: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
@@ -2052,6 +2127,7 @@ impl TermWindow {
                             tab.resize(self.terminal_size);
                         }
                     }
+                    self.sidebar_bind_pending_open_to_tab(tab_id);
                 }
                 MuxNotification::PaneOutput(pane_id) => {
                     self.mux_pane_output_event(pane_id);
@@ -2114,6 +2190,8 @@ impl TermWindow {
             TermWindowNotif::SwitchToMuxWindow(mux_window_id) => {
                 self.mux_window_id = mux_window_id;
                 *self.mux_window_id_for_subscriptions.lock().unwrap() = mux_window_id;
+                self.workspace_sidebar_pending_opens.clear();
+                self.prune_workspace_sidebar_tab_bindings();
 
                 self.clear_all_overlays();
                 self.current_highlight.take();
@@ -4660,6 +4738,7 @@ impl TermWindow {
             self.assign_overlay(tab_id, overlay);
             promise::spawn::spawn(future).detach();
         } else {
+            self.sidebar_unbind_tab(tab_id);
             mux.remove_tab(tab_id);
         }
     }
@@ -4698,6 +4777,7 @@ impl TermWindow {
                     }
                 }
             }
+            self.sidebar_unbind_tab(tab_id);
             mux.remove_tab(tab_id);
         }
     }

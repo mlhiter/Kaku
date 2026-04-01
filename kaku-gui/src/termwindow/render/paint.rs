@@ -491,6 +491,9 @@ impl crate::TermWindow {
             return Ok(());
         }
 
+        self.paint_workspace_sidebar(&mut layers)
+            .context("paint_workspace_sidebar")?;
+
         let num_panes = panes.len();
         let broadcast_visual_mode = self.broadcast_input_visual_mode();
         let mut input_target_top_right: Vec<(f32, f32, bool)> = vec![];

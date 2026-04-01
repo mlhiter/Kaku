@@ -33,6 +33,7 @@ mod config_tui;
 mod doctor;
 mod init;
 mod kaku_theme;
+mod m1_workspace;
 mod reset;
 mod shell;
 mod tui_core;
@@ -153,6 +154,12 @@ enum SubCommand {
         hide = true
     )]
     Cli(cli::CliCommand),
+
+    #[command(
+        name = "m1",
+        about = "M1 workspace: project/session/pin/local persistence"
+    )]
+    M1(m1_workspace::M1Command),
 
     #[command(
         name = "set-working-directory",
@@ -329,6 +336,7 @@ fn run() -> anyhow::Result<()> {
             env_bootstrap::bootstrap();
             cli::run_cli(&opts, cli)
         }
+        SubCommand::M1(cmd) => cmd.run(),
         #[cfg(feature = "remote")]
         SubCommand::Remote => {
             let state = kaku_remote::read_state()?;
