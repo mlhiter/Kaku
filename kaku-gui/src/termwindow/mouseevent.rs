@@ -824,13 +824,13 @@ impl super::TermWindow {
                     session_id,
                 } = action
                 {
-                    if let Err(err) = self.perform_workspace_sidebar_action(
-                        SidebarAction::RenameSession {
-                            project_id,
-                            session_id,
-                        },
+                    if let Err(err) = self.sidebar_open_session_context_menu(
+                        project_id.as_str(),
+                        session_id.as_str(),
+                        event.coords.x,
+                        event.coords.y,
                     ) {
-                        log::warn!("workspace sidebar right-click action failed: {:#}", err);
+                        log::warn!("workspace sidebar context menu failed: {:#}", err);
                     }
                     context.invalidate();
                 } else {

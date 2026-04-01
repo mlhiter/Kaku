@@ -1,5 +1,6 @@
 use crate::quad::TripleLayerQuadAllocator;
 use crate::spawn::SpawnWhere;
+use crate::termwindow::sidebar_context_menu::{SidebarContextMenuItem, SidebarContextMenuModal};
 use crate::termwindow::{
     SidebarAction, TermWindowNotif, UIItem, UIItemType, WorkspaceSidebarActionHit,
     WorkspaceSidebarPendingOpen, WorkspaceSidebarProject, WorkspaceSidebarSession,
@@ -713,8 +714,6 @@ impl crate::TermWindow {
     fn build_workspace_sidebar_lines(&self) -> Vec<SidebarLine> {
         let line_char_budget = self.sidebar_line_char_budget();
         let session_title_budget = line_char_budget.saturating_sub(12).max(18);
-        let action_label_budget = line_char_budget.saturating_sub(4).max(18);
-
         let mut lines = vec![
             SidebarLine::new("WORKSPACE", true),
             SidebarLine::new("", false),
@@ -764,46 +763,8 @@ impl crate::TermWindow {
                     )
                     .with_tone(status.tone()),
                 );
-                lines.push(SidebarLine::action(
-                    format!("    · {}", if session.pinned { "Unpin" } else { "Pin" }),
-                    SidebarAction::TogglePin {
-                        project_id: project.id.clone(),
-                        session_id: session.id.clone(),
-                        pinned: !session.pinned,
-                    },
-                ));
-                lines.push(SidebarLine::action(
-                    truncate_middle("    · Rename Session", action_label_budget),
-                    SidebarAction::RenameSession {
-                        project_id: project.id.clone(),
-                        session_id: session.id.clone(),
-                    },
-                ));
-                lines.push(SidebarLine::action(
-                    truncate_middle("    · Close Others (keep pinned)", action_label_budget),
-                    SidebarAction::CloseOthers {
-                        project_id: project.id.clone(),
-                        session_id: session.id.clone(),
-                    },
-                ));
-                lines.push(
-                    SidebarLine::action(
-                        truncate_middle("    · Delete Session", action_label_budget),
-                        SidebarAction::DeleteSession {
-                            project_id: project.id.clone(),
-                            session_id: session.id.clone(),
-                        },
-                    )
-                    .with_tone(SidebarLineTone::Danger),
-                );
             }
 
-            lines.push(SidebarLine::action(
-                truncate_middle("    · Close All Unpinned", action_label_budget),
-                SidebarAction::CloseAll {
-                    project_id: project.id.clone(),
-                },
-            ));
             lines.push(SidebarLine::new("", false));
         }
 
@@ -1033,6 +994,82 @@ impl crate::TermWindow {
         self.sidebar_open_session_rename_modal(project_id, session_id)
     }
 
+    pub(crate) fn sidebar_open_session_context_menu(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        mouse_x: isize,
+        mouse_y: isize,
+    ) -> anyhow::Result<()> {
+        let pinned = self
+            .sidebar_lookup_session_pinned(project_id, session_id)
+            .unwrap_or(false);
+        let pin_label = if pinned {
+            "Unpin Session"
+        } else {
+            "Pin Session"
+        };
+        let project_id = project_id.to_string();
+        let session_id = session_id.to_string();
+        let items = vec![
+            SidebarContextMenuItem::new(
+                "Open Session",
+                SidebarAction::ActivateSession {
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                "Rename Session",
+                SidebarAction::RenameSession {
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                pin_label,
+                SidebarAction::TogglePin {
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                    pinned: !pinned,
+                },
+            ),
+            SidebarContextMenuItem::new(
+                "Close Others (keep pinned)",
+                SidebarAction::CloseOthers {
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::danger(
+                "Delete Session",
+                SidebarAction::DeleteSession {
+                    project_id,
+                    session_id,
+                },
+            ),
+        ];
+
+        let anchor = UIItem {
+            x: mouse_x.max(0) as usize,
+            y: mouse_y.max(0) as usize,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(220, 360),
+            height: self
+                .render_metrics
+                .cell_size
+                .height
+                .max(1)
+                .saturating_add(8) as usize,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = SidebarContextMenuModal::new(self, anchor, items)?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
     fn sidebar_request_delete_session(
         &mut self,
         project_id: &str,
@@ -1072,10 +1109,14 @@ impl crate::TermWindow {
             project_id: project_id.to_string(),
             session_id: session_id.to_string(),
         };
+        let activate_action = SidebarAction::ActivateSession {
+            project_id: project_id.to_string(),
+            session_id: session_id.to_string(),
+        };
         let hit_anchor = self
             .workspace_sidebar_action_hits
             .iter()
-            .find(|hit| hit.action == rename_action);
+            .find(|hit| hit.action == rename_action || hit.action == activate_action);
 
         let row_height = self
             .render_metrics
@@ -1083,41 +1124,40 @@ impl crate::TermWindow {
             .height
             .max(1)
             .saturating_add(12) as usize;
-        let (anchor_x, anchor_y, anchor_width, anchor_height) = if let Some((x, y, width, height)) =
-            self.sidebar_bounds()
-        {
-            let sidebar_width = width.max(1.0) as usize;
-            let modal_width = sidebar_width.saturating_sub(24).clamp(220, 520);
-            let x = x.max(0.0) as usize + (sidebar_width.saturating_sub(modal_width) / 2);
-            if let Some(hit) = hit_anchor {
-                let y = hit.y;
-                let hit_height = hit.height.max(1);
-                (x, y, modal_width, hit_height)
+        let (anchor_x, anchor_y, anchor_width, anchor_height) =
+            if let Some((x, y, width, height)) = self.sidebar_bounds() {
+                let sidebar_width = width.max(1.0) as usize;
+                let modal_width = sidebar_width.saturating_sub(24).clamp(220, 520);
+                let x = x.max(0.0) as usize + (sidebar_width.saturating_sub(modal_width) / 2);
+                if let Some(hit) = hit_anchor {
+                    let y = hit.y;
+                    let hit_height = hit.height.max(1);
+                    (x, y, modal_width, hit_height)
+                } else {
+                    let y = y.max(0.0) as usize
+                        + ((height.max(1.0) as usize).saturating_mul(35) / 100).min(
+                            (height.max(1.0) as usize).saturating_sub(row_height.saturating_add(4)),
+                        );
+                    (x, y, modal_width, row_height)
+                }
             } else {
-                let y = y.max(0.0) as usize
-                    + ((height.max(1.0) as usize).saturating_mul(35) / 100).min(
-                        (height.max(1.0) as usize).saturating_sub(row_height.saturating_add(4)),
-                    );
+                let modal_width = self
+                    .dimensions
+                    .pixel_width
+                    .saturating_sub(48)
+                    .clamp(260, 560);
+                let x = self
+                    .dimensions
+                    .pixel_width
+                    .saturating_sub(modal_width)
+                    .saturating_div(2);
+                let y = self
+                    .dimensions
+                    .pixel_height
+                    .saturating_sub(row_height)
+                    .saturating_div(2);
                 (x, y, modal_width, row_height)
-            }
-        } else {
-            let modal_width = self
-                .dimensions
-                .pixel_width
-                .saturating_sub(48)
-                .clamp(260, 560);
-            let x = self
-                .dimensions
-                .pixel_width
-                .saturating_sub(modal_width)
-                .saturating_div(2);
-            let y = self
-                .dimensions
-                .pixel_height
-                .saturating_sub(row_height)
-                .saturating_div(2);
-            (x, y, modal_width, row_height)
-        };
+            };
 
         let anchor = UIItem {
             x: anchor_x,

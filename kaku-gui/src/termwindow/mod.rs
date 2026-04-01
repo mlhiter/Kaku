@@ -86,6 +86,7 @@ mod prevcursor;
 pub mod render;
 pub mod resize;
 mod selection;
+pub mod sidebar_context_menu;
 pub mod spawn;
 pub mod tab_rename;
 pub mod webgpu;
