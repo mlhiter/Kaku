@@ -97,3 +97,5 @@ kaku-ios/.build/
 kaku-ios/.swiftpm/xcode/
 kaku-ios/**/*.xcuserstate
 kaku-ios/**/xcschememanagement.plist
+
+.local-rustup
