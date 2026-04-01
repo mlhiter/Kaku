@@ -26,9 +26,21 @@ const INLINE_CURSOR: &[Poly] = &[Poly {
     style: PolyStyle::Outline,
 }];
 
+#[derive(Debug, Clone)]
+enum RenameTarget {
+    Tab {
+        tab_id: TabId,
+    },
+    Session {
+        project_id: String,
+        session_id: String,
+    },
+}
+
 pub struct TabRenameModal {
     element: RefCell<Option<Vec<ComputedElement>>>,
-    tab_id: TabId,
+    target: RenameTarget,
+    style_tab_id: TabId,
     anchor: UIItem,
     value: RefCell<String>,
     cursor: RefCell<usize>,
@@ -69,7 +81,8 @@ impl TabRenameModal {
 
         let modal = Self {
             element: RefCell::new(None),
-            tab_id,
+            target: RenameTarget::Tab { tab_id },
+            style_tab_id: tab_id,
             anchor,
             value: RefCell::new(value),
             cursor: RefCell::new(cursor),
@@ -77,6 +90,39 @@ impl TabRenameModal {
         };
         modal.reconfigure(term_window);
         Ok(modal)
+    }
+
+    pub fn new_session(
+        term_window: &mut TermWindow,
+        project_id: String,
+        session_id: String,
+        anchor: UIItem,
+    ) -> anyhow::Result<Self> {
+        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for rename")?;
+        let value =
+            term_window.sidebar_session_display_name(project_id.as_str(), session_id.as_str());
+        let cursor = value.chars().count();
+
+        let modal = Self {
+            element: RefCell::new(None),
+            target: RenameTarget::Session {
+                project_id,
+                session_id,
+            },
+            style_tab_id,
+            anchor,
+            value: RefCell::new(value),
+            cursor: RefCell::new(cursor),
+            selection: RefCell::new(None),
+        };
+        modal.reconfigure(term_window);
+        Ok(modal)
+    }
+
+    fn active_tab_id(term_window: &TermWindow) -> Option<TabId> {
+        Mux::get()
+            .get_window(term_window.mux_window_id)
+            .and_then(|window| window.get_active().map(|tab| tab.tab_id()))
     }
 
     fn editor_width(
@@ -307,9 +353,31 @@ impl TabRenameModal {
         true
     }
 
+    fn is_tab_target(&self) -> bool {
+        matches!(self.target, RenameTarget::Tab { .. })
+    }
+
     fn commit(&self, term_window: &mut TermWindow) {
-        if let Some(tab) = Mux::get().get_tab(self.tab_id) {
-            tab.set_title(self.value.borrow().as_str());
+        let value = self.value.borrow().clone();
+        match &self.target {
+            RenameTarget::Tab { tab_id } => {
+                if let Some(tab) = Mux::get().get_tab(*tab_id) {
+                    tab.set_title(value.as_str());
+                }
+            }
+            RenameTarget::Session {
+                project_id,
+                session_id,
+            } => {
+                if let Err(err) = term_window.sidebar_rename_session_from_modal(
+                    project_id.as_str(),
+                    session_id.as_str(),
+                    value.as_str(),
+                ) {
+                    log::warn!("rename session from modal failed: {:#}", err);
+                    term_window.show_toast("Failed to rename session".to_string());
+                }
+            }
         }
         term_window.cancel_modal();
     }
@@ -332,7 +400,11 @@ impl TabRenameModal {
     fn is_active_in_window(&self, term_window: &TermWindow) -> bool {
         let mux = Mux::get();
         mux.get_window(term_window.mux_window_id)
-            .and_then(|window| window.get_active().map(|tab| tab.tab_id() == self.tab_id))
+            .and_then(|window| {
+                window
+                    .get_active()
+                    .map(|tab| tab.tab_id() == self.style_tab_id)
+            })
             .unwrap_or(true)
     }
 
@@ -353,7 +425,7 @@ impl TabRenameModal {
             .find_map(|item| match item.item {
                 crate::tabbar::TabBarItem::Tab { tab_idx, .. } => window
                     .get_by_idx(tab_idx)
-                    .filter(|tab| tab.tab_id() == self.tab_id)
+                    .filter(|tab| tab.tab_id() == self.style_tab_id)
                     .and_then(|_| item.title.get_cell(0))
                     .map(|cell| {
                         let bg = match cell.attrs().background() {
@@ -384,7 +456,7 @@ impl TabRenameModal {
                     .find_map(|item| match item.item {
                         crate::tabbar::TabBarItem::Tab { tab_idx, .. } => window
                             .get_by_idx(tab_idx)
-                            .filter(|tab| tab.tab_id() == self.tab_id)
+                            .filter(|tab| tab.tab_id() == self.style_tab_id)
                             .and_then(|_| item.title.get_cell(0))
                             .map(|cell| cell.attrs().clone()),
                         _ => None,
@@ -842,7 +914,11 @@ impl Modal for TabRenameModal {
         if event.kind == wezterm_term::MouseEventKind::Press
             && !self.point_in_bounds(event.x as i64, event.y)
         {
-            self.commit(term_window);
+            if self.is_tab_target() {
+                self.commit(term_window);
+            } else {
+                term_window.cancel_modal();
+            }
         }
         Ok(())
     }
@@ -900,7 +976,11 @@ impl Modal for TabRenameModal {
 
     fn focus_changed(&self, focused: bool, term_window: &mut TermWindow) {
         if !focused {
-            self.commit(term_window);
+            if self.is_tab_target() {
+                self.commit(term_window);
+            } else {
+                term_window.cancel_modal();
+            }
         }
     }
 

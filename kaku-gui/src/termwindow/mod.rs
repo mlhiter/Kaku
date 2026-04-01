@@ -560,6 +560,14 @@ pub enum SidebarAction {
     CloseAll {
         project_id: String,
     },
+    RenameSession {
+        project_id: String,
+        session_id: String,
+    },
+    DeleteSession {
+        project_id: String,
+        session_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4724,7 +4732,9 @@ impl TermWindow {
         drop(mux_window);
 
         let tab_id = tab.tab_id();
+        let is_pinned = self.sidebar_is_tab_pinned(tab_id);
         let should_confirm = self.config.tab_close_confirmation
+            || is_pinned
             || (confirm && !tab.can_close_without_prompting(CloseReason::Tab));
         if should_confirm {
             if self.activate_tab(tab_idx as isize).is_err() {
@@ -4752,7 +4762,9 @@ impl TermWindow {
         let tab_id = tab.tab_id();
         let mux_window_id = self.mux_window_id;
 
+        let is_pinned = self.sidebar_is_tab_pinned(tab_id);
         let should_confirm = self.config.tab_close_confirmation
+            || is_pinned
             || (confirm && !tab.can_close_without_prompting(CloseReason::Tab));
         if should_confirm {
             // Tab has running processes; ask the user first.

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::surface::Line;
@@ -95,6 +96,7 @@ impl Default for SidebarUiStateFile {
 struct SidebarLine {
     text: String,
     is_header: bool,
+    tone: SidebarLineTone,
     action: Option<SidebarAction>,
 }
 
@@ -103,6 +105,7 @@ impl SidebarLine {
         Self {
             text: text.into(),
             is_header,
+            tone: SidebarLineTone::Default,
             action: None,
         }
     }
@@ -111,7 +114,71 @@ impl SidebarLine {
         Self {
             text: text.into(),
             is_header: false,
+            tone: SidebarLineTone::Default,
             action: Some(action),
+        }
+    }
+
+    fn with_tone(mut self, tone: SidebarLineTone) -> Self {
+        self.tone = tone;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SidebarLineTone {
+    Default,
+    Muted,
+    Info,
+    Warning,
+    Success,
+    Danger,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SidebarSessionStatus {
+    Idle,
+    Loading,
+    NeedApprove,
+    Running,
+    Done,
+    Error,
+    Unknown,
+}
+
+impl SidebarSessionStatus {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "idle" => Self::Idle,
+            "loading" => Self::Loading,
+            "need_approve" | "need-approve" | "needapprove" => Self::NeedApprove,
+            "running" => Self::Running,
+            "done" => Self::Done,
+            "error" => Self::Error,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn badge(self) -> &'static str {
+        match self {
+            Self::Idle => "I",
+            Self::Loading => "L",
+            Self::NeedApprove => "?",
+            Self::Running => "R",
+            Self::Done => "D",
+            Self::Error => "E",
+            Self::Unknown => "U",
+        }
+    }
+
+    fn tone(self) -> SidebarLineTone {
+        match self {
+            Self::Idle => SidebarLineTone::Muted,
+            Self::Loading | Self::Running => SidebarLineTone::Info,
+            Self::NeedApprove => SidebarLineTone::Warning,
+            Self::Done => SidebarLineTone::Success,
+            Self::Error => SidebarLineTone::Danger,
+            Self::Unknown => SidebarLineTone::Muted,
         }
     }
 }
@@ -130,6 +197,10 @@ enum SidebarCloseAction {
     },
     CloseAll {
         project_id: String,
+    },
+    DeleteSession {
+        project_id: String,
+        session_id: String,
     },
 }
 
@@ -252,6 +323,14 @@ impl crate::TermWindow {
             SidebarAction::CloseAll { project_id } => {
                 self.sidebar_request_close_all_unpinned(project_id.as_str())
             }
+            SidebarAction::RenameSession {
+                project_id,
+                session_id,
+            } => self.sidebar_request_rename_session(project_id.as_str(), session_id.as_str()),
+            SidebarAction::DeleteSession {
+                project_id,
+                session_id,
+            } => self.sidebar_request_delete_session(project_id.as_str(), session_id.as_str()),
         }
     }
 
@@ -282,6 +361,23 @@ impl crate::TermWindow {
                     session_id.as_str(),
                 ));
         }
+    }
+
+    pub(crate) fn sidebar_is_tab_pinned(&mut self, tab_id: TabId) -> bool {
+        self.prune_workspace_sidebar_tab_bindings();
+        let Some((project_id, session_id)) =
+            self.workspace_sidebar_tab_to_session.get(&tab_id).cloned()
+        else {
+            return false;
+        };
+
+        if let Some(pinned) = self.sidebar_lookup_session_pinned(&project_id, &session_id) {
+            return pinned;
+        }
+
+        self.force_workspace_sidebar_refresh();
+        self.sidebar_lookup_session_pinned(&project_id, &session_id)
+            .unwrap_or(false)
     }
 
     pub(crate) fn prune_workspace_sidebar_tab_bindings(&mut self) {
@@ -365,9 +461,10 @@ impl crate::TermWindow {
                 attrs.set_intensity(Intensity::Bold);
             }
             let line = Line::from_text(&entry.text, &attrs, 0, None);
+            let line_color = sidebar_line_color(text_color, entry.tone);
 
             self.paint_workspace_sidebar_line(
-                layers, line, left, top, text_width, text_color, panel_bg,
+                layers, line, left, top, text_width, line_color, panel_bg,
             )
             .context("paint sidebar line")?;
 
@@ -625,7 +722,7 @@ impl crate::TermWindow {
         ];
 
         if self.workspace_sidebar.projects.is_empty() {
-            lines.push(SidebarLine::new("  (none)", false));
+            lines.push(SidebarLine::new("  (none)", false).with_tone(SidebarLineTone::Muted));
         }
 
         for project in &self.workspace_sidebar.projects {
@@ -642,25 +739,31 @@ impl crate::TermWindow {
             ));
 
             if project.sessions.is_empty() {
-                lines.push(SidebarLine::new("    (no sessions)", false));
+                lines.push(
+                    SidebarLine::new("    (no sessions)", false).with_tone(SidebarLineTone::Muted),
+                );
                 lines.push(SidebarLine::new("", false));
                 continue;
             }
 
             for session in project.sessions.iter().take(8) {
                 let pin = if session.pinned { "*" } else { " " };
-                lines.push(SidebarLine::action(
-                    format!(
-                        "  [{}|{}] {}",
-                        pin,
-                        session.status,
-                        truncate_middle(session.title.as_str(), session_title_budget)
-                    ),
-                    SidebarAction::ActivateSession {
-                        project_id: project.id.clone(),
-                        session_id: session.id.clone(),
-                    },
-                ));
+                let status = SidebarSessionStatus::parse(session.status.as_str());
+                lines.push(
+                    SidebarLine::action(
+                        format!(
+                            "  [{}|{}] {}",
+                            pin,
+                            status.badge(),
+                            truncate_middle(session.title.as_str(), session_title_budget)
+                        ),
+                        SidebarAction::ActivateSession {
+                            project_id: project.id.clone(),
+                            session_id: session.id.clone(),
+                        },
+                    )
+                    .with_tone(status.tone()),
+                );
                 lines.push(SidebarLine::action(
                     format!("    · {}", if session.pinned { "Unpin" } else { "Pin" }),
                     SidebarAction::TogglePin {
@@ -670,12 +773,29 @@ impl crate::TermWindow {
                     },
                 ));
                 lines.push(SidebarLine::action(
+                    truncate_middle("    · Rename Session", action_label_budget),
+                    SidebarAction::RenameSession {
+                        project_id: project.id.clone(),
+                        session_id: session.id.clone(),
+                    },
+                ));
+                lines.push(SidebarLine::action(
                     truncate_middle("    · Close Others (keep pinned)", action_label_budget),
                     SidebarAction::CloseOthers {
                         project_id: project.id.clone(),
                         session_id: session.id.clone(),
                     },
                 ));
+                lines.push(
+                    SidebarLine::action(
+                        truncate_middle("    · Delete Session", action_label_budget),
+                        SidebarAction::DeleteSession {
+                            project_id: project.id.clone(),
+                            session_id: session.id.clone(),
+                        },
+                    )
+                    .with_tone(SidebarLineTone::Danger),
+                );
             }
 
             lines.push(SidebarLine::action(
@@ -688,16 +808,21 @@ impl crate::TermWindow {
         }
 
         lines.push(SidebarLine::new("Resources", true));
-        lines.push(SidebarLine::new("  Snippets (M3)", false));
-        lines.push(SidebarLine::new("  Env (M3, plaintext)", false));
-        lines.push(SidebarLine::new("  Files (M3)", false));
+        lines.push(SidebarLine::new("  Snippets (M3)", false).with_tone(SidebarLineTone::Muted));
+        lines.push(
+            SidebarLine::new("  Env (M3, plaintext)", false).with_tone(SidebarLineTone::Muted),
+        );
+        lines.push(SidebarLine::new("  Files (M3)", false).with_tone(SidebarLineTone::Muted));
         lines.push(SidebarLine::new("", false));
 
         lines.push(SidebarLine::new("Actions", true));
-        lines.push(SidebarLine::new(
-            truncate_middle("  Use `kaku m1 ...` to seed data", line_char_budget),
-            false,
-        ));
+        lines.push(
+            SidebarLine::new(
+                truncate_middle("  Use `kaku m1 ...` to seed data", line_char_budget),
+                false,
+            )
+            .with_tone(SidebarLineTone::Muted),
+        );
 
         if let Some(error) = &self.workspace_sidebar.last_load_error {
             lines.push(SidebarLine::new("", false));
@@ -808,6 +933,20 @@ impl crate::TermWindow {
         })
     }
 
+    fn sidebar_lookup_session_pinned(&self, project_id: &str, session_id: &str) -> Option<bool> {
+        self.workspace_sidebar
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id)
+                    .map(|session| session.pinned)
+            })
+    }
+
     fn sidebar_set_session_pin(
         &mut self,
         project_id: &str,
@@ -886,6 +1025,117 @@ impl crate::TermWindow {
         )
     }
 
+    fn sidebar_request_rename_session(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        self.sidebar_open_session_rename_modal(project_id, session_id)
+    }
+
+    fn sidebar_request_delete_session(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let project_name = self.sidebar_project_display_name(project_id);
+        let session_name = self.sidebar_session_display_name(project_id, session_id);
+        let pinned = self
+            .sidebar_lookup_session_pinned(project_id, session_id)
+            .unwrap_or(false);
+
+        let message = if pinned {
+            format!(
+                "Delete pinned session \"{session_name}\" from \"{project_name}\"?\nThis cannot be undone."
+            )
+        } else {
+            format!(
+                "Delete session \"{session_name}\" from \"{project_name}\"?\nThis cannot be undone."
+            )
+        };
+
+        self.sidebar_confirm_close_action(
+            message,
+            SidebarCloseAction::DeleteSession {
+                project_id: project_id.to_string(),
+                session_id: session_id.to_string(),
+            },
+        )
+    }
+
+    fn sidebar_open_session_rename_modal(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<()> {
+        let rename_action = SidebarAction::RenameSession {
+            project_id: project_id.to_string(),
+            session_id: session_id.to_string(),
+        };
+        let hit_anchor = self
+            .workspace_sidebar_action_hits
+            .iter()
+            .find(|hit| hit.action == rename_action);
+
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let (anchor_x, anchor_y, anchor_width, anchor_height) = if let Some((x, y, width, height)) =
+            self.sidebar_bounds()
+        {
+            let sidebar_width = width.max(1.0) as usize;
+            let modal_width = sidebar_width.saturating_sub(24).clamp(220, 520);
+            let x = x.max(0.0) as usize + (sidebar_width.saturating_sub(modal_width) / 2);
+            if let Some(hit) = hit_anchor {
+                let y = hit.y;
+                let hit_height = hit.height.max(1);
+                (x, y, modal_width, hit_height)
+            } else {
+                let y = y.max(0.0) as usize
+                    + ((height.max(1.0) as usize).saturating_mul(35) / 100).min(
+                        (height.max(1.0) as usize).saturating_sub(row_height.saturating_add(4)),
+                    );
+                (x, y, modal_width, row_height)
+            }
+        } else {
+            let modal_width = self
+                .dimensions
+                .pixel_width
+                .saturating_sub(48)
+                .clamp(260, 560);
+            let x = self
+                .dimensions
+                .pixel_width
+                .saturating_sub(modal_width)
+                .saturating_div(2);
+            let y = self
+                .dimensions
+                .pixel_height
+                .saturating_sub(row_height)
+                .saturating_div(2);
+            (x, y, modal_width, row_height)
+        };
+
+        let anchor = UIItem {
+            x: anchor_x,
+            y: anchor_y,
+            width: anchor_width,
+            height: anchor_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = crate::termwindow::tab_rename::TabRenameModal::new_session(
+            self,
+            project_id.to_string(),
+            session_id.to_string(),
+            anchor,
+        )?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
     fn sidebar_confirm_close_action(
         &mut self,
         message: String,
@@ -938,20 +1188,35 @@ impl crate::TermWindow {
         &mut self,
         action: SidebarCloseAction,
     ) -> anyhow::Result<()> {
-        let count = match action {
+        match action {
             SidebarCloseAction::CloseOthers {
                 project_id,
                 session_id,
-            } => self.sidebar_close_other_sessions_now(project_id.as_str(), session_id.as_str())?,
-            SidebarCloseAction::CloseAll { project_id } => {
-                self.sidebar_close_all_unpinned_now(project_id.as_str())?
+            } => {
+                let count = self
+                    .sidebar_close_other_sessions_now(project_id.as_str(), session_id.as_str())?;
+                if count == 0 {
+                    self.show_toast("No unpinned sessions to close".to_string());
+                } else {
+                    self.show_toast(format!("Closed {count} {}.", pluralize_session(count)));
+                }
             }
-        };
-
-        if count == 0 {
-            self.show_toast("No unpinned sessions to close".to_string());
-        } else {
-            self.show_toast(format!("Closed {count} {}.", pluralize_session(count)));
+            SidebarCloseAction::CloseAll { project_id } => {
+                let count = self.sidebar_close_all_unpinned_now(project_id.as_str())?;
+                if count == 0 {
+                    self.show_toast("No unpinned sessions to close".to_string());
+                } else {
+                    self.show_toast(format!("Closed {count} {}.", pluralize_session(count)));
+                }
+            }
+            SidebarCloseAction::DeleteSession {
+                project_id,
+                session_id,
+            } => {
+                let deleted_title =
+                    self.sidebar_delete_session_now(project_id.as_str(), session_id.as_str())?;
+                self.show_toast(format!("Deleted session \"{deleted_title}\"."));
+            }
         }
         Ok(())
     }
@@ -968,6 +1233,102 @@ impl crate::TermWindow {
     fn sidebar_close_all_unpinned_now(&mut self, project_id: &str) -> anyhow::Result<usize> {
         let to_close = self.sidebar_collect_close_all_tabs(project_id);
         Ok(self.sidebar_close_tabs(&to_close))
+    }
+
+    fn sidebar_rename_session_now(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        title: &str,
+    ) -> anyhow::Result<String> {
+        let normalized_title = title.trim();
+        if normalized_title.is_empty() {
+            bail!("session title cannot be empty");
+        }
+
+        let sessions_path = sidebar_state_root()
+            .join("projects")
+            .join(project_id)
+            .join("sessions.json");
+        if !sessions_path.exists() {
+            bail!("sessions file not found: {}", sessions_path.display());
+        }
+
+        let mut sessions_file: SessionsFile = read_json_file(&sessions_path)?;
+        let session = sessions_file
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| anyhow!("session not found in storage: {session_id}"))?;
+
+        session.title = normalized_title.to_string();
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json_file_atomic(&sessions_path, &sessions_file)?;
+
+        let key = sidebar_session_key(project_id, session_id);
+        if let Some(tab_id) = self.workspace_sidebar_session_to_tab.get(&key).copied() {
+            let mux = Mux::get();
+            if let Some(tab) = mux.get_tab(tab_id) {
+                tab.set_title(normalized_title);
+            }
+        }
+
+        self.force_workspace_sidebar_refresh();
+        Ok(normalized_title.to_string())
+    }
+
+    pub(crate) fn sidebar_rename_session_from_modal(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        title: &str,
+    ) -> anyhow::Result<()> {
+        let normalized_title = title.trim();
+        if normalized_title.is_empty() {
+            self.show_toast("Session title cannot be empty".to_string());
+            return Ok(());
+        }
+
+        let previous = self.sidebar_session_display_name(project_id, session_id);
+        if normalized_title == previous.trim() {
+            return Ok(());
+        }
+
+        let updated = self.sidebar_rename_session_now(project_id, session_id, normalized_title)?;
+        self.show_toast(format!("Renamed session to \"{updated}\"."));
+        Ok(())
+    }
+
+    fn sidebar_delete_session_now(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+    ) -> anyhow::Result<String> {
+        let sessions_path = sidebar_state_root()
+            .join("projects")
+            .join(project_id)
+            .join("sessions.json");
+        if !sessions_path.exists() {
+            bail!("sessions file not found: {}", sessions_path.display());
+        }
+
+        let mut sessions_file: SessionsFile = read_json_file(&sessions_path)?;
+        let idx = sessions_file
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .ok_or_else(|| anyhow!("session not found in storage: {session_id}"))?;
+        let removed = sessions_file.sessions.remove(idx);
+        write_json_file_atomic(&sessions_path, &sessions_file)?;
+
+        self.prune_workspace_sidebar_tab_bindings();
+        let key = sidebar_session_key(project_id, session_id);
+        if let Some(tab_id) = self.workspace_sidebar_session_to_tab.get(&key).copied() {
+            self.sidebar_close_tabs(&[tab_id]);
+        }
+
+        self.force_workspace_sidebar_refresh();
+        Ok(removed.title)
     }
 
     fn sidebar_collect_close_other_tabs(
@@ -1039,7 +1400,11 @@ impl crate::TermWindow {
             .unwrap_or_else(|| project_id.to_string())
     }
 
-    fn sidebar_session_display_name(&self, project_id: &str, session_id: &str) -> String {
+    pub(crate) fn sidebar_session_display_name(
+        &self,
+        project_id: &str,
+        session_id: &str,
+    ) -> String {
         self.workspace_sidebar
             .projects
             .iter()
@@ -1200,4 +1565,76 @@ fn sidebar_background_color(background: LinearRgba) -> LinearRgba {
 
 fn sidebar_border_color(foreground: LinearRgba) -> LinearRgba {
     foreground.mul_alpha(0.35)
+}
+
+fn sidebar_line_color(base: LinearRgba, tone: SidebarLineTone) -> LinearRgba {
+    match tone {
+        SidebarLineTone::Default => base,
+        SidebarLineTone::Muted => base.mul_alpha(0.72),
+        SidebarLineTone::Info => mix_linear(base, LinearRgba(0.38, 0.70, 0.96, base.3), 0.68),
+        SidebarLineTone::Warning => mix_linear(base, LinearRgba(0.96, 0.74, 0.22, base.3), 0.72),
+        SidebarLineTone::Success => mix_linear(base, LinearRgba(0.37, 0.83, 0.47, base.3), 0.68),
+        SidebarLineTone::Danger => mix_linear(base, LinearRgba(0.93, 0.36, 0.36, base.3), 0.70),
+    }
+}
+
+fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
+    let t = factor.clamp(0.0, 1.0);
+    LinearRgba(
+        (base.0 * (1.0 - t) + target.0 * t).clamp(0.0, 1.0),
+        (base.1 * (1.0 - t) + target.1 * t).clamp(0.0, 1.0),
+        (base.2 * (1.0 - t) + target.2 * t).clamp(0.0, 1.0),
+        base.3,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SidebarLineTone, SidebarSessionStatus};
+
+    #[test]
+    fn parses_session_status_aliases() {
+        assert_eq!(
+            SidebarSessionStatus::parse("idle"),
+            SidebarSessionStatus::Idle
+        );
+        assert_eq!(
+            SidebarSessionStatus::parse("need_approve"),
+            SidebarSessionStatus::NeedApprove
+        );
+        assert_eq!(
+            SidebarSessionStatus::parse("need-approve"),
+            SidebarSessionStatus::NeedApprove
+        );
+        assert_eq!(
+            SidebarSessionStatus::parse("needapprove"),
+            SidebarSessionStatus::NeedApprove
+        );
+        assert_eq!(
+            SidebarSessionStatus::parse("unknown-status"),
+            SidebarSessionStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn maps_status_to_badge_and_tone() {
+        let cases = [
+            (SidebarSessionStatus::Idle, "I", SidebarLineTone::Muted),
+            (SidebarSessionStatus::Loading, "L", SidebarLineTone::Info),
+            (
+                SidebarSessionStatus::NeedApprove,
+                "?",
+                SidebarLineTone::Warning,
+            ),
+            (SidebarSessionStatus::Running, "R", SidebarLineTone::Info),
+            (SidebarSessionStatus::Done, "D", SidebarLineTone::Success),
+            (SidebarSessionStatus::Error, "E", SidebarLineTone::Danger),
+            (SidebarSessionStatus::Unknown, "U", SidebarLineTone::Muted),
+        ];
+
+        for (status, expected_badge, expected_tone) in cases {
+            assert_eq!(status.badge(), expected_badge);
+            assert_eq!(status.tone(), expected_tone);
+        }
+    }
 }

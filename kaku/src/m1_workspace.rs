@@ -54,6 +54,20 @@ impl M1Command {
                     service.set_session_pinned(&cmd.project_id, &cmd.session_id, false)?;
                 print_json(&session)
             }
+            M1SubCommand::SetSessionStatus(cmd) => {
+                let session =
+                    service.set_session_status(&cmd.project_id, &cmd.session_id, cmd.status)?;
+                print_json(&session)
+            }
+            M1SubCommand::RenameSession(cmd) => {
+                let session =
+                    service.rename_session(&cmd.project_id, &cmd.session_id, &cmd.title)?;
+                print_json(&session)
+            }
+            M1SubCommand::DeleteSession(cmd) => {
+                let deleted = service.delete_session(&cmd.project_id, &cmd.session_id)?;
+                print_json(&deleted)
+            }
         }
     }
 }
@@ -80,6 +94,15 @@ enum M1SubCommand {
 
     #[command(name = "unpin-session", about = "Unpin a session")]
     UnpinSession(PinSessionCommand),
+
+    #[command(name = "set-session-status", about = "Set status for a session")]
+    SetSessionStatus(SetSessionStatusCommand),
+
+    #[command(name = "rename-session", about = "Rename a session")]
+    RenameSession(RenameSessionCommand),
+
+    #[command(name = "delete-session", about = "Delete a session")]
+    DeleteSession(DeleteSessionCommand),
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -111,6 +134,39 @@ struct ListSessionsCommand {
 
 #[derive(Debug, Parser, Clone)]
 struct PinSessionCommand {
+    #[arg(long)]
+    project_id: String,
+
+    #[arg(long)]
+    session_id: String,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct SetSessionStatusCommand {
+    #[arg(long)]
+    project_id: String,
+
+    #[arg(long)]
+    session_id: String,
+
+    #[arg(long, value_parser = parse_session_status)]
+    status: SessionStatus,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct RenameSessionCommand {
+    #[arg(long)]
+    project_id: String,
+
+    #[arg(long)]
+    session_id: String,
+
+    #[arg(long)]
+    title: String,
+}
+
+#[derive(Debug, Parser, Clone)]
+struct DeleteSessionCommand {
     #[arg(long)]
     project_id: String,
 
@@ -155,6 +211,14 @@ pub struct Session {
     pub pinned: bool,
     pub status: SessionStatus,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeletedSession {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub deleted_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,6 +400,87 @@ impl WorkspaceService {
         self.store.save_projects(&projects_file)?;
         Ok(updated)
     }
+
+    fn set_session_status(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        status: SessionStatus,
+    ) -> anyhow::Result<Session> {
+        let mut projects_file = self.store.load_projects()?;
+        let now = now_rfc3339();
+        let project = find_project_mut(&mut projects_file.projects, project_id)?;
+        project.last_active_at = now.clone();
+
+        let mut sessions_file = self.store.load_sessions(project_id)?;
+        let session = sessions_file
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
+
+        session.status = status;
+        session.updated_at = now;
+
+        let updated = session.clone();
+        self.store.save_sessions(project_id, &sessions_file)?;
+        self.store.save_projects(&projects_file)?;
+        Ok(updated)
+    }
+
+    fn rename_session(
+        &self,
+        project_id: &str,
+        session_id: &str,
+        title: &str,
+    ) -> anyhow::Result<Session> {
+        let normalized_title = normalize_session_title(title)?;
+
+        let mut projects_file = self.store.load_projects()?;
+        let now = now_rfc3339();
+        let project = find_project_mut(&mut projects_file.projects, project_id)?;
+        project.last_active_at = now.clone();
+
+        let mut sessions_file = self.store.load_sessions(project_id)?;
+        let session = sessions_file
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
+
+        session.title = normalized_title;
+        session.updated_at = now;
+
+        let updated = session.clone();
+        self.store.save_sessions(project_id, &sessions_file)?;
+        self.store.save_projects(&projects_file)?;
+        Ok(updated)
+    }
+
+    fn delete_session(&self, project_id: &str, session_id: &str) -> anyhow::Result<DeletedSession> {
+        let mut projects_file = self.store.load_projects()?;
+        let now = now_rfc3339();
+        let project = find_project_mut(&mut projects_file.projects, project_id)?;
+        project.last_active_at = now.clone();
+
+        let mut sessions_file = self.store.load_sessions(project_id)?;
+        let index = sessions_file
+            .sessions
+            .iter()
+            .position(|session| session.id == session_id)
+            .ok_or_else(|| anyhow!("session not found: {session_id}"))?;
+
+        let removed = sessions_file.sessions.remove(index);
+        self.store.save_sessions(project_id, &sessions_file)?;
+        self.store.save_projects(&projects_file)?;
+
+        Ok(DeletedSession {
+            id: removed.id,
+            project_id: removed.project_id,
+            title: removed.title,
+            deleted_at: now,
+        })
+    }
 }
 
 fn print_json<T: Serialize>(value: &T) -> anyhow::Result<()> {
@@ -375,8 +520,31 @@ fn normalize_root_path(path: &Path) -> anyhow::Result<String> {
     Ok(absolute.to_string_lossy().into_owned())
 }
 
+fn normalize_session_title(input: &str) -> anyhow::Result<String> {
+    let title = input.trim();
+    if title.is_empty() {
+        bail!("session title cannot be empty");
+    }
+    Ok(title.to_string())
+}
+
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn parse_session_status(raw: &str) -> Result<SessionStatus, String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "idle" => Ok(SessionStatus::Idle),
+        "loading" => Ok(SessionStatus::Loading),
+        "need_approve" | "need-approve" | "needapprove" => Ok(SessionStatus::NeedApprove),
+        "running" => Ok(SessionStatus::Running),
+        "done" => Ok(SessionStatus::Done),
+        "error" => Ok(SessionStatus::Error),
+        _ => Err(format!(
+            "invalid status `{raw}`. expected one of: idle, loading, need_approve, running, done, error"
+        )),
+    }
 }
 
 fn generate_id(prefix: &str) -> String {
@@ -450,6 +618,9 @@ mod tests {
         service
             .set_session_pinned(&project.id, &first.id, true)
             .expect("pin first session");
+        service
+            .set_session_status(&project.id, &first.id, SessionStatus::NeedApprove)
+            .expect("set status");
 
         let reloaded = WorkspaceService::new(state_root.clone());
         let projects = reloaded.list_projects().expect("list projects");
@@ -467,6 +638,14 @@ mod tests {
                 .expect("find pinned session")
                 .pinned
         );
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|session| session.id == first.id)
+                .expect("find status session")
+                .status,
+            SessionStatus::NeedApprove
+        );
 
         assert!(state_root.join("projects.json").exists());
         assert!(state_root
@@ -474,5 +653,40 @@ mod tests {
             .join(&project.id)
             .join("sessions.json")
             .exists());
+    }
+
+    #[test]
+    fn renames_and_deletes_sessions() {
+        let temp = tempdir().expect("tempdir");
+        let state_root = temp.path().join(".kaku");
+        let service = WorkspaceService::new(state_root.clone());
+
+        let project = service
+            .create_project("demo", temp.path())
+            .expect("create project");
+        let first = service
+            .create_session(&project.id, "first", AgentType::Codex)
+            .expect("create first session");
+        let second = service
+            .create_session(&project.id, "second", AgentType::Shell)
+            .expect("create second session");
+
+        let renamed = service
+            .rename_session(&project.id, &first.id, "renamed-first")
+            .expect("rename first session");
+        assert_eq!(renamed.title, "renamed-first");
+
+        let deleted = service
+            .delete_session(&project.id, &second.id)
+            .expect("delete second session");
+        assert_eq!(deleted.id, second.id);
+
+        let reloaded = WorkspaceService::new(state_root);
+        let sessions = reloaded
+            .list_sessions(&project.id)
+            .expect("list sessions after rename/delete");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, first.id);
+        assert_eq!(sessions[0].title, "renamed-first");
     }
 }

@@ -818,6 +818,25 @@ impl super::TermWindow {
                 }
                 context.invalidate();
             }
+            WMEK::Press(MousePress::Right) => {
+                if let SidebarAction::ActivateSession {
+                    project_id,
+                    session_id,
+                } = action
+                {
+                    if let Err(err) = self.perform_workspace_sidebar_action(
+                        SidebarAction::RenameSession {
+                            project_id,
+                            session_id,
+                        },
+                    ) {
+                        log::warn!("workspace sidebar right-click action failed: {:#}", err);
+                    }
+                    context.invalidate();
+                } else {
+                    context.set_cursor(Some(MouseCursor::Arrow));
+                }
+            }
             WMEK::Move => {
                 context.set_cursor(Some(MouseCursor::Hand));
             }
