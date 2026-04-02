@@ -813,17 +813,80 @@ impl super::TermWindow {
     ) {
         match event.kind {
             WMEK::Press(MousePress::Left) => {
-                if let Err(err) = self.perform_workspace_sidebar_action(action) {
-                    log::warn!("workspace sidebar action failed: {:#}", err);
+                let is_double_click = self.last_mouse_click.as_ref().map(|c| c.streak) == Some(2);
+                match action {
+                    SidebarAction::OpenProjectContextMenu { project_id } => {
+                        if let Err(err) = self.sidebar_open_project_context_menu(
+                            project_id.as_str(),
+                            event.coords.x,
+                            event.coords.y,
+                        ) {
+                            log::warn!("workspace project context menu failed: {:#}", err);
+                        }
+                    }
+                    SidebarAction::OpenSessionContextMenu {
+                        project_id,
+                        session_id,
+                    } => {
+                        if let Err(err) = self.sidebar_open_session_context_menu(
+                            project_id.as_str(),
+                            session_id.as_str(),
+                            event.coords.x,
+                            event.coords.y,
+                        ) {
+                            log::warn!("workspace sidebar context menu failed: {:#}", err);
+                        }
+                    }
+                    SidebarAction::ActivateSession {
+                        project_id,
+                        session_id,
+                    } if is_double_click => {
+                        if let Err(err) =
+                            self.perform_workspace_sidebar_action(SidebarAction::RenameSession {
+                                project_id,
+                                session_id,
+                            })
+                        {
+                            log::warn!("workspace sidebar session-rename failed: {:#}", err);
+                        }
+                    }
+                    SidebarAction::ProjectRow { project_id } => {
+                        if is_double_click {
+                            if let Err(err) = self.perform_workspace_sidebar_action(
+                                SidebarAction::RenameProject { project_id },
+                            ) {
+                                log::warn!("workspace sidebar project-rename failed: {:#}", err);
+                            }
+                        }
+                    }
+                    action => {
+                        if let Err(err) = self.perform_workspace_sidebar_action(action) {
+                            log::warn!("workspace sidebar action failed: {:#}", err);
+                        }
+                    }
                 }
                 context.invalidate();
             }
-            WMEK::Press(MousePress::Right) => {
-                if let SidebarAction::ActivateSession {
+            WMEK::Press(MousePress::Right) => match action {
+                SidebarAction::ProjectRow { project_id }
+                | SidebarAction::OpenProjectContextMenu { project_id } => {
+                    if let Err(err) = self.sidebar_open_project_context_menu(
+                        project_id.as_str(),
+                        event.coords.x,
+                        event.coords.y,
+                    ) {
+                        log::warn!("workspace project context menu failed: {:#}", err);
+                    }
+                    context.invalidate();
+                }
+                SidebarAction::ActivateSession {
                     project_id,
                     session_id,
-                } = action
-                {
+                }
+                | SidebarAction::OpenSessionContextMenu {
+                    project_id,
+                    session_id,
+                } => {
                     if let Err(err) = self.sidebar_open_session_context_menu(
                         project_id.as_str(),
                         session_id.as_str(),
@@ -833,10 +896,11 @@ impl super::TermWindow {
                         log::warn!("workspace sidebar context menu failed: {:#}", err);
                     }
                     context.invalidate();
-                } else {
+                }
+                _ => {
                     context.set_cursor(Some(MouseCursor::Arrow));
                 }
-            }
+            },
             WMEK::Move => {
                 context.set_cursor(Some(MouseCursor::Hand));
             }

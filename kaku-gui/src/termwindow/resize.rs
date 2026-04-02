@@ -740,7 +740,10 @@ impl super::TermWindow {
             dpi: size.dpi,
         };
 
-        let show_tab_bar = config.enable_tab_bar && !config.hide_tab_bar_if_only_one_tab;
+        let show_tab_bar = Mux::get()
+            .get_window(self.mux_window_id)
+            .map(|window| self.should_show_tab_bar(window.len()))
+            .unwrap_or_else(|| self.should_show_tab_bar(1));
         let tab_bar_height = if show_tab_bar {
             self.tab_bar_pixel_height()? as usize
         } else {

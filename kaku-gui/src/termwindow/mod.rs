@@ -545,7 +545,24 @@ pub enum TermWindowNotif {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarAction {
+    CreateProject,
+    CreateSessionInProject {
+        project_id: String,
+    },
+    ProjectRow {
+        project_id: String,
+    },
+    OpenProjectContextMenu {
+        project_id: String,
+    },
+    RenameProject {
+        project_id: String,
+    },
     ActivateSession {
+        project_id: String,
+        session_id: String,
+    },
+    OpenSessionContextMenu {
         project_id: String,
         session_id: String,
     },
@@ -568,6 +585,9 @@ pub enum SidebarAction {
     DeleteSession {
         project_id: String,
         session_id: String,
+    },
+    DeleteProject {
+        project_id: String,
     },
 }
 
@@ -951,6 +971,7 @@ pub struct TermWindow {
     tab_drag_state: Option<TabDragState>,
     workspace_sidebar: WorkspaceSidebarState,
     workspace_sidebar_width_px: usize,
+    workspace_sidebar_visible: bool,
     workspace_sidebar_action_hits: Vec<WorkspaceSidebarActionHit>,
     workspace_sidebar_pending_opens: VecDeque<WorkspaceSidebarPendingOpen>,
     workspace_sidebar_tab_to_session: HashMap<TabId, (String, String)>,
@@ -1308,10 +1329,13 @@ impl TermWindow {
         let (render_metrics, _metrics_cache_hit) =
             render_metrics_from_cache_or_compute(&fontconfig, &config, dpi, persisted_font_scale)?;
         log::trace!("using render_metrics {:#?}", render_metrics);
+        let persisted_sidebar_ui_state = render::sidebar::load_persisted_sidebar_ui_state();
 
-        // Initially we have only a single tab, so take that into account
-        // for the tab bar state.
-        let show_tab_bar = config.enable_tab_bar && !config.hide_tab_bar_if_only_one_tab;
+        // Workspace sidebar is the primary navigation surface in this fork.
+        // Keep the legacy tab bar hidden from first paint.
+        let show_tab_bar = !persisted_sidebar_ui_state.visible
+            && config.enable_tab_bar
+            && !config.hide_tab_bar_if_only_one_tab;
         let tab_bar_height = if show_tab_bar {
             Self::tab_bar_pixel_height_impl(&config, &fontconfig, &render_metrics)? as usize
         } else {
@@ -1531,7 +1555,8 @@ impl TermWindow {
             split_drag_state: None,
             tab_drag_state: None,
             workspace_sidebar: WorkspaceSidebarState::default(),
-            workspace_sidebar_width_px: render::sidebar::load_persisted_sidebar_width_px(),
+            workspace_sidebar_width_px: persisted_sidebar_ui_state.width_px,
+            workspace_sidebar_visible: persisted_sidebar_ui_state.visible,
             workspace_sidebar_action_hits: Vec::new(),
             workspace_sidebar_pending_opens: VecDeque::new(),
             workspace_sidebar_tab_to_session: HashMap::new(),
@@ -2601,6 +2626,12 @@ impl TermWindow {
     /// Decide whether the tab bar should be visible based on tab count,
     /// fullscreen state, and config.
     fn should_show_tab_bar(&self, num_tabs: usize) -> bool {
+        // Workspace sidebar is the primary navigation surface for this fork;
+        // keep the original tab bar hidden to avoid duplicated tab controls.
+        if self.sidebar_reserved_width_px() > 0 {
+            return false;
+        }
+
         let is_full_screen = self.layout_is_effective_fullscreen();
         if is_full_screen {
             // Always show tab bar in fullscreen mode to display the right status (time)
@@ -4021,6 +4052,38 @@ impl TermWindow {
                     pane.writer().write_all(b"kaku\n")?;
                 } else if name == "run-kaku-ai-config" {
                     pane.writer().write_all(b"kaku ai\n")?;
+                } else if name == "kaku-sidebar-toggle" {
+                    let is_visible = self.sidebar_toggle_visible();
+                    self.show_toast(if is_visible {
+                        "Sidebar shown".to_string()
+                    } else {
+                        "Sidebar hidden".to_string()
+                    });
+                } else if name == "kaku-sidebar-create-project" {
+                    if let Err(err) = self.sidebar_shortcut_create_project() {
+                        log::warn!("workspace sidebar shortcut create-project failed: {:#}", err);
+                        self.show_toast("Failed to create project".to_string());
+                    }
+                } else if name == "kaku-sidebar-create-session" {
+                    if let Err(err) = self.sidebar_shortcut_create_session() {
+                        log::warn!("workspace sidebar shortcut create-session failed: {:#}", err);
+                        self.show_toast("Failed to create session".to_string());
+                    }
+                } else if name == "kaku-sidebar-toggle-pin" {
+                    if let Err(err) = self.sidebar_shortcut_toggle_pin_current_session() {
+                        log::warn!("workspace sidebar shortcut toggle-pin failed: {:#}", err);
+                        self.show_toast("Failed to update session pin".to_string());
+                    }
+                } else if name == "kaku-sidebar-rename-session" {
+                    if let Err(err) = self.sidebar_shortcut_rename_current_session() {
+                        log::warn!("workspace sidebar shortcut rename-session failed: {:#}", err);
+                        self.show_toast("Failed to rename session".to_string());
+                    }
+                } else if name == "kaku-sidebar-delete-session" {
+                    if let Err(err) = self.sidebar_shortcut_delete_current_session() {
+                        log::warn!("workspace sidebar shortcut delete-session failed: {:#}", err);
+                        self.show_toast("Failed to delete session".to_string());
+                    }
                 } else if let Some(msg) = lookup_kaku_toast(name) {
                     self.show_toast(msg.to_string());
                 } else if name == "kaku-toast-ai-analyzing" {

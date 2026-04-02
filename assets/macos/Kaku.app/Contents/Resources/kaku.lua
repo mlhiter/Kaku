@@ -3460,6 +3460,44 @@ config.keys = {
     action = wezterm.action.EmitEvent('kaku-open-remote-files'),
   },
 
+  -- Workspace Sidebar
+  -- Cmd+Shift+B: toggle workspace sidebar visibility
+  {
+    key = 'B',
+    mods = 'CMD|SHIFT',
+    action = wezterm.action.EmitEvent('kaku-sidebar-toggle'),
+  },
+  -- Cmd+Option+N: create project
+  {
+    key = 'n',
+    mods = 'CMD|OPT',
+    action = wezterm.action.EmitEvent('kaku-sidebar-create-project'),
+  },
+  -- Cmd+Option+T: create session in current project
+  {
+    key = 't',
+    mods = 'CMD|OPT',
+    action = wezterm.action.EmitEvent('kaku-sidebar-create-session'),
+  },
+  -- Cmd+Option+P: pin/unpin current session
+  {
+    key = 'p',
+    mods = 'CMD|OPT',
+    action = wezterm.action.EmitEvent('kaku-sidebar-toggle-pin'),
+  },
+  -- Cmd+Option+R: rename current session
+  {
+    key = 'r',
+    mods = 'CMD|OPT',
+    action = wezterm.action.EmitEvent('kaku-sidebar-rename-session'),
+  },
+  -- Cmd+Option+Backspace: delete current session (with confirmation)
+  {
+    key = 'Backspace',
+    mods = 'CMD|OPT',
+    action = wezterm.action.EmitEvent('kaku-sidebar-delete-session'),
+  },
+
   -- Window Controls
   -- Cmd+Ctrl+F: toggle fullscreen
   {

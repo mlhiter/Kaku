@@ -8,6 +8,7 @@ use crate::termwindow::{
 use anyhow::{anyhow, bail, Context};
 use chrono::Utc;
 use config::keyassignment::{SpawnCommand, SpawnTabDomain};
+use mux::pane::CachePolicy;
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
 use mux::Mux;
@@ -16,6 +17,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::surface::Line;
@@ -25,23 +27,43 @@ use window::{color::LinearRgba, WindowOps};
 const SIDEBAR_DEFAULT_WIDTH_PX: usize = 320;
 const SIDEBAR_MIN_WIDTH_PX: usize = 240;
 const SIDEBAR_MAX_WIDTH_PX: usize = 620;
+const SIDEBAR_DEFAULT_VISIBLE: bool = true;
 const SIDEBAR_RESIZE_HANDLE_WIDTH_PX: usize = 8;
 const SIDEBAR_REFRESH_INTERVAL: Duration = Duration::from_millis(1200);
 const SIDEBAR_TEXT_LEFT_PADDING: f32 = 12.0;
 const SIDEBAR_TEXT_TOP_PADDING: f32 = 12.0;
 const SIDEBAR_UI_STATE_RELATIVE_PATH: &str = "gui/sidebar.json";
+const SIDEBAR_MORE_BUTTON_WIDTH_PX: usize = 28;
+const SIDEBAR_MORE_BUTTON_RIGHT_PADDING_PX: usize = 8;
 
-#[derive(Debug, Default, Deserialize)]
+static SIDEBAR_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectsFile {
+    #[serde(default = "schema_version")]
+    version: u8,
     #[serde(default)]
     projects: Vec<ProjectEntry>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl Default for ProjectsFile {
+    fn default() -> Self {
+        Self {
+            version: schema_version(),
+            projects: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProjectEntry {
     id: String,
     name: String,
     root_path: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    last_active_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +101,8 @@ struct SidebarUiStateFile {
     version: u8,
     #[serde(default)]
     width_px: usize,
+    #[serde(default = "sidebar_default_visible")]
+    visible: bool,
     #[serde(default)]
     updated_at: String,
 }
@@ -88,9 +112,16 @@ impl Default for SidebarUiStateFile {
         Self {
             version: schema_version(),
             width_px: SIDEBAR_DEFAULT_WIDTH_PX,
+            visible: SIDEBAR_DEFAULT_VISIBLE,
             updated_at: String::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PersistedSidebarUiState {
+    pub width_px: usize,
+    pub visible: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +130,13 @@ struct SidebarLine {
     is_header: bool,
     tone: SidebarLineTone,
     action: Option<SidebarAction>,
+    trailing_buttons: Vec<SidebarTrailingButton>,
+}
+
+#[derive(Debug, Clone)]
+struct SidebarTrailingButton {
+    label: &'static str,
+    action: SidebarAction,
 }
 
 impl SidebarLine {
@@ -108,6 +146,7 @@ impl SidebarLine {
             is_header,
             tone: SidebarLineTone::Default,
             action: None,
+            trailing_buttons: Vec::new(),
         }
     }
 
@@ -117,11 +156,22 @@ impl SidebarLine {
             is_header: false,
             tone: SidebarLineTone::Default,
             action: Some(action),
+            trailing_buttons: Vec::new(),
         }
     }
 
     fn with_tone(mut self, tone: SidebarLineTone) -> Self {
         self.tone = tone;
+        self
+    }
+
+    fn with_trailing_button(
+        mut self,
+        label: &'static str,
+        action: SidebarAction,
+    ) -> Self {
+        self.trailing_buttons
+            .push(SidebarTrailingButton { label, action });
         self
     }
 }
@@ -203,14 +253,20 @@ enum SidebarCloseAction {
         project_id: String,
         session_id: String,
     },
+    DeleteProject {
+        project_id: String,
+    },
 }
 
-pub(crate) fn load_persisted_sidebar_width_px() -> usize {
+pub(crate) fn load_persisted_sidebar_ui_state() -> PersistedSidebarUiState {
     let path = sidebar_ui_state_path();
     let data = match std::fs::read(&path) {
         Ok(data) => data,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return SIDEBAR_DEFAULT_WIDTH_PX;
+            return PersistedSidebarUiState {
+                width_px: SIDEBAR_DEFAULT_WIDTH_PX,
+                visible: SIDEBAR_DEFAULT_VISIBLE,
+            };
         }
         Err(err) => {
             log::warn!(
@@ -218,33 +274,49 @@ pub(crate) fn load_persisted_sidebar_width_px() -> usize {
                 path.display(),
                 err
             );
-            return SIDEBAR_DEFAULT_WIDTH_PX;
+            return PersistedSidebarUiState {
+                width_px: SIDEBAR_DEFAULT_WIDTH_PX,
+                visible: SIDEBAR_DEFAULT_VISIBLE,
+            };
         }
     };
 
     match serde_json::from_slice::<SidebarUiStateFile>(&data) {
-        Ok(state) => state
-            .width_px
-            .clamp(SIDEBAR_MIN_WIDTH_PX, SIDEBAR_MAX_WIDTH_PX),
+        Ok(state) => PersistedSidebarUiState {
+            width_px: state
+                .width_px
+                .clamp(SIDEBAR_MIN_WIDTH_PX, SIDEBAR_MAX_WIDTH_PX),
+            visible: state.visible,
+        },
         Err(err) => {
             log::warn!(
                 "workspace sidebar: failed to parse sidebar ui state {}: {}",
                 path.display(),
                 err
             );
-            SIDEBAR_DEFAULT_WIDTH_PX
+            PersistedSidebarUiState {
+                width_px: SIDEBAR_DEFAULT_WIDTH_PX,
+                visible: SIDEBAR_DEFAULT_VISIBLE,
+            }
         }
     }
 }
 
 impl crate::TermWindow {
-    pub(crate) fn sidebar_reserved_width_px(&self) -> usize {
+    fn sidebar_stored_width_px(&self) -> usize {
         let width = if self.workspace_sidebar_width_px == 0 {
             SIDEBAR_DEFAULT_WIDTH_PX
         } else {
             self.workspace_sidebar_width_px
         };
         width.clamp(SIDEBAR_MIN_WIDTH_PX, SIDEBAR_MAX_WIDTH_PX)
+    }
+
+    pub(crate) fn sidebar_reserved_width_px(&self) -> usize {
+        if !self.workspace_sidebar_visible {
+            return 0;
+        }
+        self.sidebar_stored_width_px()
     }
 
     pub(crate) fn sidebar_resize_handle_width_px(&self) -> usize {
@@ -260,9 +332,51 @@ impl crate::TermWindow {
         true
     }
 
+    fn sidebar_persist_ui_state(&mut self, failure_message: &str) {
+        let path = sidebar_ui_state_path();
+        let state = SidebarUiStateFile {
+            version: schema_version(),
+            width_px: self.sidebar_stored_width_px(),
+            visible: self.workspace_sidebar_visible,
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        if let Err(err) = write_json_file_atomic(&path, &state) {
+            log::warn!(
+                "workspace sidebar: failed to persist sidebar state {}: {:#}",
+                path.display(),
+                err
+            );
+            self.show_toast(failure_message.to_string());
+        }
+    }
+
+    pub(crate) fn sidebar_set_visible(&mut self, visible: bool) -> bool {
+        if self.workspace_sidebar_visible == visible {
+            return false;
+        }
+
+        self.workspace_sidebar_visible = visible;
+        self.sidebar_persist_ui_state("Failed to save sidebar state");
+        self.sync_tab_bar_visibility_for_window_state("workspace_sidebar_visibility_changed");
+
+        if let Some(window) = self.window.clone() {
+            let dimensions = self.dimensions;
+            self.apply_dimensions(&dimensions, None, &window, true);
+            window.invalidate();
+        }
+
+        true
+    }
+
+    pub(crate) fn sidebar_toggle_visible(&mut self) -> bool {
+        self.sidebar_set_visible(!self.workspace_sidebar_visible);
+        self.workspace_sidebar_visible
+    }
+
     pub(crate) fn sidebar_resize_from_drag(&mut self, start_x: isize, current_x: isize) -> bool {
         let delta = current_x.saturating_sub(start_x);
-        let start_width = self.sidebar_reserved_width_px() as isize;
+        let start_width = self.sidebar_stored_width_px() as isize;
         let next_width = (start_width + delta)
             .clamp(SIDEBAR_MIN_WIDTH_PX as isize, SIDEBAR_MAX_WIDTH_PX as isize)
             as usize;
@@ -270,21 +384,7 @@ impl crate::TermWindow {
     }
 
     pub(crate) fn sidebar_persist_width_px(&mut self) {
-        let path = sidebar_ui_state_path();
-        let state = SidebarUiStateFile {
-            version: schema_version(),
-            width_px: self.sidebar_reserved_width_px(),
-            updated_at: Utc::now().to_rfc3339(),
-        };
-
-        if let Err(err) = write_json_file_atomic(&path, &state) {
-            log::warn!(
-                "workspace sidebar: failed to persist sidebar width {}: {:#}",
-                path.display(),
-                err
-            );
-            self.show_toast("Failed to save sidebar width".to_string());
-        }
+        self.sidebar_persist_ui_state("Failed to save sidebar width");
     }
 
     pub(crate) fn workspace_sidebar_action_at(&self, x: isize, y: isize) -> Option<SidebarAction> {
@@ -306,10 +406,20 @@ impl crate::TermWindow {
         self.force_workspace_sidebar_refresh();
 
         match action {
+            SidebarAction::CreateProject => self.sidebar_request_create_project(),
+            SidebarAction::CreateSessionInProject { project_id } => {
+                self.sidebar_create_session_in_project(project_id.as_str())
+            }
+            SidebarAction::ProjectRow { .. } => Ok(()),
+            SidebarAction::OpenProjectContextMenu { .. } => Ok(()),
+            SidebarAction::RenameProject { project_id } => {
+                self.sidebar_request_rename_project(project_id.as_str())
+            }
             SidebarAction::ActivateSession {
                 project_id,
                 session_id,
             } => self.sidebar_activate_session(project_id.as_str(), session_id.as_str()),
+            SidebarAction::OpenSessionContextMenu { .. } => Ok(()),
             SidebarAction::TogglePin {
                 project_id,
                 session_id,
@@ -332,6 +442,9 @@ impl crate::TermWindow {
                 project_id,
                 session_id,
             } => self.sidebar_request_delete_session(project_id.as_str(), session_id.as_str()),
+            SidebarAction::DeleteProject { project_id } => {
+                self.sidebar_request_delete_project(project_id.as_str())
+            }
         }
     }
 
@@ -379,6 +492,69 @@ impl crate::TermWindow {
         self.force_workspace_sidebar_refresh();
         self.sidebar_lookup_session_pinned(&project_id, &session_id)
             .unwrap_or(false)
+    }
+
+    fn sidebar_active_project_and_session(&mut self) -> Option<(String, String)> {
+        self.prune_workspace_sidebar_tab_bindings();
+        let mux = Mux::get();
+        let tab_id = mux.get_active_tab_for_window(self.mux_window_id)?.tab_id();
+        self.workspace_sidebar_tab_to_session.get(&tab_id).cloned()
+    }
+
+    fn sidebar_active_project_for_shortcuts(&mut self) -> Option<String> {
+        if let Some((project_id, _)) = self.sidebar_active_project_and_session() {
+            return Some(project_id);
+        }
+
+        self.refresh_workspace_sidebar_if_needed();
+        if self.workspace_sidebar.projects.len() == 1 {
+            return self.workspace_sidebar.projects.first().map(|project| project.id.clone());
+        }
+
+        None
+    }
+
+    pub(crate) fn sidebar_shortcut_create_project(&mut self) -> anyhow::Result<()> {
+        self.sidebar_request_create_project()
+    }
+
+    pub(crate) fn sidebar_shortcut_create_session(&mut self) -> anyhow::Result<()> {
+        let Some(project_id) = self.sidebar_active_project_for_shortcuts() else {
+            self.show_toast("Select a project before creating a session".to_string());
+            return Ok(());
+        };
+
+        self.sidebar_create_session_in_project(project_id.as_str())
+    }
+
+    pub(crate) fn sidebar_shortcut_toggle_pin_current_session(&mut self) -> anyhow::Result<()> {
+        let Some((project_id, session_id)) = self.sidebar_active_project_and_session() else {
+            self.show_toast("No active session to pin".to_string());
+            return Ok(());
+        };
+
+        let pinned = self
+            .sidebar_lookup_session_pinned(project_id.as_str(), session_id.as_str())
+            .unwrap_or(false);
+        self.sidebar_set_session_pin(project_id.as_str(), session_id.as_str(), !pinned)
+    }
+
+    pub(crate) fn sidebar_shortcut_rename_current_session(&mut self) -> anyhow::Result<()> {
+        let Some((project_id, session_id)) = self.sidebar_active_project_and_session() else {
+            self.show_toast("No active session to rename".to_string());
+            return Ok(());
+        };
+
+        self.sidebar_request_rename_session(project_id.as_str(), session_id.as_str())
+    }
+
+    pub(crate) fn sidebar_shortcut_delete_current_session(&mut self) -> anyhow::Result<()> {
+        let Some((project_id, session_id)) = self.sidebar_active_project_and_session() else {
+            self.show_toast("No active session to delete".to_string());
+            return Ok(());
+        };
+
+        self.sidebar_request_delete_session(project_id.as_str(), session_id.as_str())
     }
 
     pub(crate) fn prune_workspace_sidebar_tab_bindings(&mut self) {
@@ -456,6 +632,18 @@ impl crate::TermWindow {
             if top > max_top {
                 break;
             }
+            let row_y = top.max(0.0);
+            let row_height = line_height.max(1.0).ceil();
+
+            if entry.is_header && !entry.text.trim().is_empty() {
+                self.filled_rectangle(
+                    layers,
+                    1,
+                    euclid::rect(x + 4.0, row_y, (width - 8.0).max(0.0), row_height),
+                    sidebar_header_background_color(panel_bg, text_color),
+                )
+                .context("paint sidebar header background")?;
+            }
 
             let mut attrs = CellAttributes::default();
             if entry.is_header {
@@ -470,8 +658,8 @@ impl crate::TermWindow {
             .context("paint sidebar line")?;
 
             if let Some(action) = entry.action {
-                let y = top.max(0.0) as usize;
-                let height = line_height.max(1.0).ceil() as usize;
+                let y = row_y as usize;
+                let height = row_height as usize;
                 self.ui_items.push(UIItem {
                     x: x as usize,
                     y,
@@ -479,14 +667,87 @@ impl crate::TermWindow {
                     height,
                     item_type: UIItemType::SidebarAction(action.clone()),
                 });
-                self.workspace_sidebar_action_hits
-                    .push(WorkspaceSidebarActionHit {
-                        x: x as usize,
-                        y,
-                        width: width as usize,
-                        height,
-                        action,
-                    });
+                if !sidebar_action_needs_pointer_position(&action) {
+                    self.workspace_sidebar_action_hits
+                        .push(WorkspaceSidebarActionHit {
+                            x: x as usize,
+                            y,
+                            width: width as usize,
+                            height,
+                            action,
+                        });
+                }
+            }
+
+            if !entry.trailing_buttons.is_empty() {
+                let is_hovered = self.current_mouse_event.as_ref().is_some_and(|event| {
+                    event.coords.x as f32 >= x
+                        && event.coords.x as f32 <= x + width
+                        && event.coords.y as f32 >= row_y
+                        && event.coords.y as f32 <= row_y + row_height
+                });
+                if is_hovered {
+                    let button_width = SIDEBAR_MORE_BUTTON_WIDTH_PX
+                        .min((width as usize).saturating_sub(16))
+                        .max(22) as f32;
+                    let glyph_width = self.render_metrics.cell_size.width as f32;
+                    let button_bg = sidebar_more_button_background(panel_bg, text_color);
+                    let mut button_right = x + width - SIDEBAR_MORE_BUTTON_RIGHT_PADDING_PX as f32;
+
+                    for button in entry.trailing_buttons.iter().rev() {
+                        let button_x = (button_right - button_width).max(left);
+                        if button_x >= button_right {
+                            break;
+                        }
+
+                        self.filled_rectangle(
+                            layers,
+                            1,
+                            euclid::rect(button_x, row_y, button_width, row_height),
+                            button_bg,
+                        )
+                        .context("paint sidebar more button background")?;
+
+                        let mut more_attrs = CellAttributes::default();
+                        more_attrs.set_intensity(Intensity::Bold);
+                        let more = Line::from_text(button.label, &more_attrs, 0, None);
+                        let more_left = button_x + ((button_width - glyph_width).max(0.0) / 2.0);
+                        self.paint_workspace_sidebar_line(
+                            layers,
+                            more,
+                            more_left,
+                            top,
+                            glyph_width.max(8.0),
+                            sidebar_more_button_foreground(text_color),
+                            button_bg,
+                        )
+                        .context("paint sidebar more button glyph")?;
+
+                        let button_action = button.action.clone();
+                        self.ui_items.push(UIItem {
+                            x: button_x.max(0.0) as usize,
+                            y: row_y as usize,
+                            width: button_width.max(1.0) as usize,
+                            height: row_height.max(1.0) as usize,
+                            item_type: UIItemType::SidebarAction(button_action.clone()),
+                        });
+                        if !sidebar_action_needs_pointer_position(&button_action) {
+                            self.workspace_sidebar_action_hits
+                                .push(WorkspaceSidebarActionHit {
+                                    x: button_x.max(0.0) as usize,
+                                    y: row_y as usize,
+                                    width: button_width.max(1.0) as usize,
+                                    height: row_height.max(1.0) as usize,
+                                    action: button_action,
+                                });
+                        }
+
+                        button_right = button_x - 4.0;
+                        if button_right <= left {
+                            break;
+                        }
+                    }
+                }
             }
 
             top += line_height;
@@ -713,11 +974,13 @@ impl crate::TermWindow {
 
     fn build_workspace_sidebar_lines(&self) -> Vec<SidebarLine> {
         let line_char_budget = self.sidebar_line_char_budget();
-        let session_title_budget = line_char_budget.saturating_sub(12).max(18);
+        let session_title_budget = line_char_budget.saturating_sub(20).max(16);
         let mut lines = vec![
-            SidebarLine::new("WORKSPACE", true),
+            SidebarLine::new("WORKSPACE", true).with_tone(SidebarLineTone::Info),
             SidebarLine::new("", false),
-            SidebarLine::new("Projects", true),
+            SidebarLine::new("Projects", true)
+                .with_tone(SidebarLineTone::Info)
+                .with_trailing_button("+", SidebarAction::CreateProject),
         ];
 
         if self.workspace_sidebar.projects.is_empty() {
@@ -725,17 +988,23 @@ impl crate::TermWindow {
         }
 
         for project in &self.workspace_sidebar.projects {
-            lines.push(SidebarLine::new(
-                format!(
-                    "- {} [{}]",
-                    project.name,
-                    truncate_middle(
-                        short_project_path(project.root_path.as_str()).as_str(),
-                        line_char_budget
-                    )
+            lines.push(
+                SidebarLine::action(
+                    format!("- {}", truncate_middle(project.name.as_str(), line_char_budget)),
+                    SidebarAction::ProjectRow {
+                        project_id: project.id.clone(),
+                    },
+                )
+                .with_trailing_button("+", SidebarAction::CreateSessionInProject {
+                    project_id: project.id.clone(),
+                })
+                .with_trailing_button(
+                    "⋯",
+                    SidebarAction::OpenProjectContextMenu {
+                        project_id: project.id.clone(),
+                    },
                 ),
-                false,
-            ));
+            );
 
             if project.sessions.is_empty() {
                 lines.push(
@@ -746,14 +1015,18 @@ impl crate::TermWindow {
             }
 
             for session in project.sessions.iter().take(8) {
-                let pin = if session.pinned { "*" } else { " " };
+                let pin = if session.pinned { "📌" } else { "·" };
                 let status = SidebarSessionStatus::parse(session.status.as_str());
+                let status_chip = if status == SidebarSessionStatus::Idle {
+                    format!("[{pin}]")
+                } else {
+                    format!("[{pin}|{}]", status.badge())
+                };
                 lines.push(
                     SidebarLine::action(
                         format!(
-                            "  [{}|{}] {}",
-                            pin,
-                            status.badge(),
+                            "  {} {}",
+                            status_chip,
                             truncate_middle(session.title.as_str(), session_title_budget)
                         ),
                         SidebarAction::ActivateSession {
@@ -761,29 +1034,27 @@ impl crate::TermWindow {
                             session_id: session.id.clone(),
                         },
                     )
-                    .with_tone(status.tone()),
+                    .with_tone(status.tone())
+                    .with_trailing_button(
+                        "⋯",
+                        SidebarAction::OpenSessionContextMenu {
+                            project_id: project.id.clone(),
+                            session_id: session.id.clone(),
+                        },
+                    ),
                 );
             }
 
             lines.push(SidebarLine::new("", false));
         }
 
-        lines.push(SidebarLine::new("Resources", true));
+        lines.push(SidebarLine::new("Resources", true).with_tone(SidebarLineTone::Info));
         lines.push(SidebarLine::new("  Snippets (M3)", false).with_tone(SidebarLineTone::Muted));
         lines.push(
             SidebarLine::new("  Env (M3, plaintext)", false).with_tone(SidebarLineTone::Muted),
         );
         lines.push(SidebarLine::new("  Files (M3)", false).with_tone(SidebarLineTone::Muted));
         lines.push(SidebarLine::new("", false));
-
-        lines.push(SidebarLine::new("Actions", true));
-        lines.push(
-            SidebarLine::new(
-                truncate_middle("  Use `kaku m1 ...` to seed data", line_char_budget),
-                false,
-            )
-            .with_tone(SidebarLineTone::Muted),
-        );
 
         if let Some(error) = &self.workspace_sidebar.last_load_error {
             lines.push(SidebarLine::new("", false));
@@ -795,6 +1066,234 @@ impl crate::TermWindow {
         }
 
         lines
+    }
+
+    fn sidebar_request_create_project(&mut self) -> anyhow::Result<()> {
+        self.sidebar_open_create_project_modal()
+    }
+
+    fn sidebar_open_create_project_modal(&mut self) -> anyhow::Result<()> {
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let mut anchor = UIItem {
+            x: 12,
+            y: 32,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(260, 560),
+            height: row_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        if let Some(hit) = self
+            .workspace_sidebar_action_hits
+            .iter()
+            .find(|hit| hit.action == SidebarAction::CreateProject)
+        {
+            anchor.x = hit.x;
+            anchor.y = hit.y;
+            anchor.width = hit.width.clamp(240, 560);
+            anchor.height = hit.height.max(1);
+        }
+
+        let modal =
+            crate::termwindow::tab_rename::TabRenameModal::new_create_project(self, anchor)?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_create_project_from_modal(
+        &mut self,
+        root_path: &str,
+    ) -> anyhow::Result<()> {
+        self.sidebar_create_project_with_root_path(root_path)
+    }
+
+    fn sidebar_create_project_with_root_path(&mut self, root_path: &str) -> anyhow::Result<()> {
+        let normalized_root = normalize_root_path(Path::new(root_path.trim()))?;
+
+        let projects_path = sidebar_state_root().join("projects.json");
+        let mut projects_file: ProjectsFile = read_json_file_or_default(&projects_path)?;
+        if let Some(existing) = projects_file
+            .projects
+            .iter()
+            .find(|project| project.root_path == normalized_root)
+        {
+            self.show_toast(format!("Project \"{}\" already exists.", existing.name));
+            return Ok(());
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let project_name = short_project_path(normalized_root.as_str());
+        let project = ProjectEntry {
+            id: generate_sidebar_id("proj"),
+            name: if project_name.is_empty() {
+                "project".to_string()
+            } else {
+                project_name
+            },
+            root_path: normalized_root,
+            created_at: now.clone(),
+            last_active_at: now,
+        };
+        let project_id = project.id.clone();
+        let project_name = project.name.clone();
+        projects_file.projects.push(project);
+        write_json_file_atomic(&projects_path, &projects_file)?;
+
+        let sessions_path = sidebar_state_root()
+            .join("projects")
+            .join(project_id)
+            .join("sessions.json");
+        if !sessions_path.exists() {
+            write_json_file_atomic(&sessions_path, &SessionsFile::default())?;
+        }
+
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Created project \"{}\".", project_name));
+        Ok(())
+    }
+
+    fn sidebar_create_session_in_project(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let sessions_path = sidebar_state_root()
+            .join("projects")
+            .join(project_id)
+            .join("sessions.json");
+        let mut sessions_file: SessionsFile = read_json_file_or_default(&sessions_path)?;
+        let now = Utc::now().to_rfc3339();
+        let title = sidebar_next_session_title(&sessions_file.sessions);
+        let session_id = generate_sidebar_id("sess");
+        sessions_file.sessions.push(SessionEntry {
+            id: session_id.clone(),
+            title,
+            status: "idle".to_string(),
+            pinned: false,
+            updated_at: now.clone(),
+        });
+        write_json_file_atomic(&sessions_path, &sessions_file)?;
+        self.sidebar_touch_project_last_active(project_id, now.as_str())?;
+        self.force_workspace_sidebar_refresh();
+        self.sidebar_activate_session(project_id, session_id.as_str())?;
+        self.sidebar_open_session_rename_modal(project_id, session_id.as_str())?;
+        Ok(())
+    }
+
+    fn sidebar_request_rename_project(&mut self, project_id: &str) -> anyhow::Result<()> {
+        self.sidebar_open_project_rename_modal(project_id)
+    }
+
+    fn sidebar_open_project_rename_modal(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let mut anchor = UIItem {
+            x: 12,
+            y: 64,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(220, 560),
+            height: row_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        if let Some(hit) = self.workspace_sidebar_action_hits.iter().find(|hit| {
+            hit.action
+                == (SidebarAction::ProjectRow {
+                    project_id: project_id.to_string(),
+                })
+        }) {
+            anchor.x = hit.x;
+            anchor.y = hit.y;
+            anchor.width = hit.width.clamp(220, 560);
+            anchor.height = hit.height.max(1);
+        }
+
+        let modal = crate::termwindow::tab_rename::TabRenameModal::new_project(
+            self,
+            project_id.to_string(),
+            anchor,
+        )?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    fn sidebar_rename_project_now(
+        &mut self,
+        project_id: &str,
+        title: &str,
+    ) -> anyhow::Result<String> {
+        let normalized_title = title.trim();
+        if normalized_title.is_empty() {
+            bail!("project title cannot be empty");
+        }
+
+        let projects_path = sidebar_state_root().join("projects.json");
+        let mut projects_file: ProjectsFile = read_json_file_or_default(&projects_path)?;
+        let project = projects_file
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+            .ok_or_else(|| anyhow!("project not found in storage: {project_id}"))?;
+        project.name = normalized_title.to_string();
+        project.last_active_at = Utc::now().to_rfc3339();
+        write_json_file_atomic(&projects_path, &projects_file)?;
+        self.force_workspace_sidebar_refresh();
+        Ok(normalized_title.to_string())
+    }
+
+    pub(crate) fn sidebar_rename_project_from_modal(
+        &mut self,
+        project_id: &str,
+        title: &str,
+    ) -> anyhow::Result<()> {
+        let normalized_title = title.trim();
+        if normalized_title.is_empty() {
+            self.show_toast("Project title cannot be empty".to_string());
+            return Ok(());
+        }
+
+        let previous = self.sidebar_project_display_name(project_id);
+        if normalized_title == previous.trim() {
+            return Ok(());
+        }
+
+        let updated = self.sidebar_rename_project_now(project_id, normalized_title)?;
+        self.show_toast(format!("Renamed project to \"{updated}\"."));
+        Ok(())
+    }
+
+    fn sidebar_touch_project_last_active(
+        &mut self,
+        project_id: &str,
+        last_active_at: &str,
+    ) -> anyhow::Result<()> {
+        let projects_path = sidebar_state_root().join("projects.json");
+        let mut projects_file: ProjectsFile = read_json_file_or_default(&projects_path)?;
+        if let Some(project) = projects_file
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+        {
+            project.last_active_at = last_active_at.to_string();
+        }
+        write_json_file_atomic(&projects_path, &projects_file)?;
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_current_working_directory(&self) -> Option<PathBuf> {
+        self.get_active_pane_or_overlay()
+            .and_then(|pane| {
+                pane.get_current_working_dir(CachePolicy::AllowStale)
+                    .and_then(|url| url.to_file_path().ok())
+            })
+            .filter(|cwd| cwd.is_absolute())
     }
 
     fn sidebar_activate_session(
@@ -994,6 +1493,52 @@ impl crate::TermWindow {
         self.sidebar_open_session_rename_modal(project_id, session_id)
     }
 
+    pub(crate) fn sidebar_open_project_context_menu(
+        &mut self,
+        project_id: &str,
+        mouse_x: isize,
+        mouse_y: isize,
+    ) -> anyhow::Result<()> {
+        let project_id = project_id.to_string();
+        let items = vec![
+            SidebarContextMenuItem::new(
+                "New Session",
+                SidebarAction::CreateSessionInProject {
+                    project_id: project_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                "Rename Project",
+                SidebarAction::RenameProject {
+                    project_id: project_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::danger(
+                "Delete Project",
+                SidebarAction::DeleteProject { project_id },
+            ),
+        ];
+
+        let anchor = UIItem {
+            x: mouse_x.max(0) as usize,
+            y: mouse_y.max(0) as usize,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(220, 360),
+            height: self
+                .render_metrics
+                .cell_size
+                .height
+                .max(1)
+                .saturating_add(8) as usize,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = SidebarContextMenuModal::new(self, anchor, items)?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
     pub(crate) fn sidebar_open_session_context_menu(
         &mut self,
         project_id: &str,
@@ -1096,6 +1641,42 @@ impl crate::TermWindow {
             SidebarCloseAction::DeleteSession {
                 project_id: project_id.to_string(),
                 session_id: session_id.to_string(),
+            },
+        )
+    }
+
+    fn sidebar_request_delete_project(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let project_name = self.sidebar_project_display_name(project_id);
+        let (session_count, pinned_count) = self
+            .workspace_sidebar
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| {
+                let sessions = project.sessions.len();
+                let pinned = project.sessions.iter().filter(|session| session.pinned).count();
+                (sessions, pinned)
+            })
+            .unwrap_or((0, 0));
+
+        let message = if session_count == 0 {
+            format!("Delete project \"{project_name}\"?\nThis cannot be undone.")
+        } else if pinned_count > 0 {
+            format!(
+                "Delete project \"{project_name}\" with {session_count} {} ({pinned_count} pinned)?\nThis cannot be undone.",
+                pluralize_session(session_count)
+            )
+        } else {
+            format!(
+                "Delete project \"{project_name}\" with {session_count} {}?\nThis cannot be undone.",
+                pluralize_session(session_count)
+            )
+        };
+
+        self.sidebar_confirm_close_action(
+            message,
+            SidebarCloseAction::DeleteProject {
+                project_id: project_id.to_string(),
             },
         )
     }
@@ -1205,7 +1786,7 @@ impl crate::TermWindow {
                                 "workspace sidebar: failed to execute confirmed close action: {:#}",
                                 err
                             );
-                            term_window.show_toast("Failed to close sessions".to_string());
+                            term_window.show_toast("Failed to apply sidebar action".to_string());
                         }
                     })));
                 }
@@ -1256,6 +1837,10 @@ impl crate::TermWindow {
                 let deleted_title =
                     self.sidebar_delete_session_now(project_id.as_str(), session_id.as_str())?;
                 self.show_toast(format!("Deleted session \"{deleted_title}\"."));
+            }
+            SidebarCloseAction::DeleteProject { project_id } => {
+                let deleted_name = self.sidebar_delete_project_now(project_id.as_str())?;
+                self.show_toast(format!("Deleted project \"{deleted_name}\"."));
             }
         }
         Ok(())
@@ -1371,6 +1956,39 @@ impl crate::TermWindow {
         Ok(removed.title)
     }
 
+    fn sidebar_delete_project_now(&mut self, project_id: &str) -> anyhow::Result<String> {
+        let projects_path = sidebar_state_root().join("projects.json");
+        let mut projects_file: ProjectsFile = read_json_file_or_default(&projects_path)?;
+        let idx = projects_file
+            .projects
+            .iter()
+            .position(|project| project.id == project_id)
+            .ok_or_else(|| anyhow!("project not found in storage: {project_id}"))?;
+        let removed = projects_file.projects.remove(idx);
+        write_json_file_atomic(&projects_path, &projects_file)?;
+
+        let project_dir = sidebar_state_root().join("projects").join(project_id);
+        if project_dir.exists() {
+            std::fs::remove_dir_all(&project_dir)
+                .with_context(|| format!("remove {}", project_dir.display()))?;
+        }
+
+        self.workspace_sidebar_pending_opens
+            .retain(|pending| pending.project_id != project_id);
+        self.prune_workspace_sidebar_tab_bindings();
+        let to_close: Vec<TabId> = self
+            .workspace_sidebar_tab_to_session
+            .iter()
+            .filter_map(|(tab_id, (tab_project_id, _))| {
+                (tab_project_id == project_id).then_some(*tab_id)
+            })
+            .collect();
+        self.sidebar_close_tabs(&to_close);
+
+        self.force_workspace_sidebar_refresh();
+        Ok(removed.name)
+    }
+
     fn sidebar_collect_close_other_tabs(
         &mut self,
         project_id: &str,
@@ -1431,7 +2049,7 @@ impl crate::TermWindow {
         closed
     }
 
-    fn sidebar_project_display_name(&self, project_id: &str) -> String {
+    pub(crate) fn sidebar_project_display_name(&self, project_id: &str) -> String {
         self.workspace_sidebar
             .projects
             .iter()
@@ -1500,6 +2118,10 @@ fn schema_version() -> u8 {
     1
 }
 
+fn sidebar_default_visible() -> bool {
+    SIDEBAR_DEFAULT_VISIBLE
+}
+
 fn read_json_file<T>(path: &Path) -> anyhow::Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -1507,6 +2129,19 @@ where
     let content =
         std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     serde_json::from_str(&content).with_context(|| format!("parse {}", path.display()))
+}
+
+fn read_json_file_or_default<T>(path: &Path) -> anyhow::Result<T>
+where
+    T: for<'de> Deserialize<'de> + Default,
+{
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            serde_json::from_str(&content).with_context(|| format!("parse {}", path.display()))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
 }
 
 fn write_json_file_atomic<T>(path: &Path, value: &T) -> anyhow::Result<()>
@@ -1552,6 +2187,62 @@ where
         )
     })?;
     Ok(())
+}
+
+fn normalize_root_path(path: &Path) -> anyhow::Result<String> {
+    let expanded = match path.to_str().map(str::trim) {
+        Some("~") => config::HOME_DIR.clone(),
+        Some(raw) if raw.starts_with("~/") => {
+            let suffix = raw.trim_start_matches("~/");
+            config::HOME_DIR.join(suffix)
+        }
+        _ => path.to_path_buf(),
+    };
+
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()
+            .context("read current directory")?
+            .join(expanded)
+    };
+
+    if !absolute.is_dir() {
+        bail!("root path is not a directory: {}", absolute.display());
+    }
+
+    let normalized = absolute
+        .canonicalize()
+        .unwrap_or_else(|_| absolute.clone());
+
+    Ok(normalized.to_string_lossy().into_owned())
+}
+
+fn generate_sidebar_id(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let seq = SIDEBAR_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}_{:x}{:x}{:x}", nanos, std::process::id(), seq)
+}
+
+fn sidebar_next_session_title(existing: &[SessionEntry]) -> String {
+    let mut idx = existing.len().saturating_add(1);
+    loop {
+        let candidate = format!("session-{idx}");
+        if !existing.iter().any(|session| session.title == candidate) {
+            return candidate;
+        }
+        idx = idx.saturating_add(1);
+    }
+}
+
+fn sidebar_action_needs_pointer_position(action: &SidebarAction) -> bool {
+    matches!(
+        action,
+        SidebarAction::OpenSessionContextMenu { .. } | SidebarAction::OpenProjectContextMenu { .. }
+    )
 }
 
 fn short_project_path(path: &str) -> String {
@@ -1607,6 +2298,18 @@ fn sidebar_border_color(foreground: LinearRgba) -> LinearRgba {
     foreground.mul_alpha(0.35)
 }
 
+fn sidebar_header_background_color(background: LinearRgba, foreground: LinearRgba) -> LinearRgba {
+    mix_linear(background, foreground.mul_alpha(0.22), 0.26).mul_alpha(0.96)
+}
+
+fn sidebar_more_button_background(background: LinearRgba, foreground: LinearRgba) -> LinearRgba {
+    mix_linear(background, foreground.mul_alpha(0.18), 0.22).mul_alpha(0.98)
+}
+
+fn sidebar_more_button_foreground(foreground: LinearRgba) -> LinearRgba {
+    foreground.mul_alpha(0.92)
+}
+
 fn sidebar_line_color(base: LinearRgba, tone: SidebarLineTone) -> LinearRgba {
     match tone {
         SidebarLineTone::Default => base,
@@ -1630,7 +2333,10 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 
 #[cfg(test)]
 mod tests {
-    use super::{SidebarLineTone, SidebarSessionStatus};
+    use super::{
+        sidebar_action_needs_pointer_position, sidebar_next_session_title, SessionEntry,
+        SidebarAction, SidebarLineTone, SidebarSessionStatus,
+    };
 
     #[test]
     fn parses_session_status_aliases() {
@@ -1676,5 +2382,44 @@ mod tests {
             assert_eq!(status.badge(), expected_badge);
             assert_eq!(status.tone(), expected_tone);
         }
+    }
+
+    #[test]
+    fn next_session_title_skips_existing_suffix() {
+        let existing = vec![
+            SessionEntry {
+                id: "sess_1".to_string(),
+                title: "session-1".to_string(),
+                status: "idle".to_string(),
+                pinned: false,
+                updated_at: String::new(),
+            },
+            SessionEntry {
+                id: "sess_2".to_string(),
+                title: "session-2".to_string(),
+                status: "idle".to_string(),
+                pinned: false,
+                updated_at: String::new(),
+            },
+        ];
+
+        assert_eq!(sidebar_next_session_title(&existing), "session-3");
+    }
+
+    #[test]
+    fn open_menu_action_requires_pointer_context() {
+        let action = SidebarAction::OpenSessionContextMenu {
+            project_id: "proj".to_string(),
+            session_id: "sess".to_string(),
+        };
+        assert!(sidebar_action_needs_pointer_position(&action));
+        assert!(sidebar_action_needs_pointer_position(
+            &SidebarAction::OpenProjectContextMenu {
+                project_id: "proj".to_string()
+            }
+        ));
+        assert!(!sidebar_action_needs_pointer_position(
+            &SidebarAction::CreateProject
+        ));
     }
 }

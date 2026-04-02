@@ -31,10 +31,14 @@ enum RenameTarget {
     Tab {
         tab_id: TabId,
     },
+    Project {
+        project_id: String,
+    },
     Session {
         project_id: String,
         session_id: String,
     },
+    CreateProject,
 }
 
 pub struct TabRenameModal {
@@ -109,6 +113,53 @@ impl TabRenameModal {
                 project_id,
                 session_id,
             },
+            style_tab_id,
+            anchor,
+            value: RefCell::new(value),
+            cursor: RefCell::new(cursor),
+            selection: RefCell::new(None),
+        };
+        modal.reconfigure(term_window);
+        Ok(modal)
+    }
+
+    pub fn new_project(
+        term_window: &mut TermWindow,
+        project_id: String,
+        anchor: UIItem,
+    ) -> anyhow::Result<Self> {
+        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for rename")?;
+        let value = term_window.sidebar_project_display_name(project_id.as_str());
+        let cursor = value.chars().count();
+
+        let modal = Self {
+            element: RefCell::new(None),
+            target: RenameTarget::Project { project_id },
+            style_tab_id,
+            anchor,
+            value: RefCell::new(value),
+            cursor: RefCell::new(cursor),
+            selection: RefCell::new(None),
+        };
+        modal.reconfigure(term_window);
+        Ok(modal)
+    }
+
+    pub fn new_create_project(
+        term_window: &mut TermWindow,
+        anchor: UIItem,
+    ) -> anyhow::Result<Self> {
+        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for prompt")?;
+        let value = term_window
+            .sidebar_current_working_directory()
+            .or_else(|| std::env::current_dir().ok())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let cursor = value.chars().count();
+
+        let modal = Self {
+            element: RefCell::new(None),
+            target: RenameTarget::CreateProject,
             style_tab_id,
             anchor,
             value: RefCell::new(value),
@@ -365,6 +416,14 @@ impl TabRenameModal {
                     tab.set_title(value.as_str());
                 }
             }
+            RenameTarget::Project { project_id } => {
+                if let Err(err) = term_window
+                    .sidebar_rename_project_from_modal(project_id.as_str(), value.as_str())
+                {
+                    log::warn!("rename project from modal failed: {:#}", err);
+                    term_window.show_toast("Failed to rename project".to_string());
+                }
+            }
             RenameTarget::Session {
                 project_id,
                 session_id,
@@ -376,6 +435,12 @@ impl TabRenameModal {
                 ) {
                     log::warn!("rename session from modal failed: {:#}", err);
                     term_window.show_toast("Failed to rename session".to_string());
+                }
+            }
+            RenameTarget::CreateProject => {
+                if let Err(err) = term_window.sidebar_create_project_from_modal(value.as_str()) {
+                    log::warn!("create project from modal failed: {:#}", err);
+                    term_window.show_toast("Failed to create project".to_string());
                 }
             }
         }
