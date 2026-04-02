@@ -3467,6 +3467,12 @@ config.keys = {
     mods = 'CMD|SHIFT',
     action = wezterm.action.EmitEvent('kaku-sidebar-toggle'),
   },
+  -- Cmd+Shift+/: open shortcuts help panel
+  {
+    key = '/',
+    mods = 'CMD|SHIFT',
+    action = wezterm.action.EmitEvent('kaku-shortcuts-help'),
+  },
   -- Cmd+Option+N: create project
   {
     key = 'n',
