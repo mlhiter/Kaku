@@ -86,7 +86,6 @@ mod prevcursor;
 pub mod render;
 pub mod resize;
 mod selection;
-pub mod shortcut_help;
 pub mod sidebar_context_menu;
 pub mod spawn;
 pub mod tab_rename;
@@ -4053,8 +4052,6 @@ impl TermWindow {
                     pane.writer().write_all(b"kaku\n")?;
                 } else if name == "run-kaku-ai-config" {
                     pane.writer().write_all(b"kaku ai\n")?;
-                } else if name == "kaku-shortcuts-help" {
-                    self.open_shortcuts_help_tab();
                 } else if name == "kaku-sidebar-toggle" {
                     let is_visible = self.sidebar_toggle_visible();
                     self.show_toast(if is_visible {

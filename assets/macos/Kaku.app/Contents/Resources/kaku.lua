@@ -3351,17 +3351,113 @@ config.native_macos_fullscreen_mode = true
 config.quit_when_all_windows_are_closed = false
 
 -- ===== Key Bindings =====
-config.keys = {
+config.keys = (function()
+  local shortcuts_help_entries = {}
+  local shortcuts_help_section_order = {}
+  local shortcuts_help_seen_sections = {}
+  local shortcuts_help_preferred_sections = {
+    'Sidebar',
+    'Tabs & Window',
+    'Pane & Tools',
+    'Editing',
+  }
+
+  local function register_shortcut_help(section, keys, description)
+    if not section or not keys or not description then
+      return
+    end
+
+    if not shortcuts_help_seen_sections[section] then
+      shortcuts_help_seen_sections[section] = true
+      table.insert(shortcuts_help_section_order, section)
+    end
+
+    table.insert(shortcuts_help_entries, {
+      section = section,
+      keys = keys,
+      description = description,
+    })
+  end
+
+  local function kb(binding, section, keys, description)
+    register_shortcut_help(section, keys, description)
+    return binding
+  end
+
+  local function build_shortcuts_help_text()
+    local lines = {
+      'Kaku Keyboard Shortcuts',
+      '',
+    }
+
+    local ordered_sections = {}
+    local added_sections = {}
+
+    for _, section in ipairs(shortcuts_help_preferred_sections) do
+      if shortcuts_help_seen_sections[section] then
+        table.insert(ordered_sections, section)
+        added_sections[section] = true
+      end
+    end
+
+    for _, section in ipairs(shortcuts_help_section_order) do
+      if not added_sections[section] then
+        table.insert(ordered_sections, section)
+        added_sections[section] = true
+      end
+    end
+
+    for _, section in ipairs(ordered_sections) do
+      table.insert(lines, section)
+      for _, entry in ipairs(shortcuts_help_entries) do
+        if entry.section == section then
+          table.insert(lines, string.format('  %-22s %s', entry.keys, entry.description))
+        end
+      end
+      table.insert(lines, '')
+    end
+
+    table.insert(lines, 'Close this help tab: press q in less, then close tab (Cmd+W)')
+    return table.concat(lines, '\n')
+  end
+
+  local function build_shortcuts_help_script(help_text)
+    return "printf '\\033]0;Kaku Shortcuts\\007'\n"
+      .. "if command -v less >/dev/null 2>&1; then\n"
+      .. "  cat <<'KAKU_SHORTCUTS' | less -R\n"
+      .. help_text
+      .. "\nKAKU_SHORTCUTS\n"
+      .. "else\n"
+      .. "  cat <<'KAKU_SHORTCUTS'\n"
+      .. help_text
+      .. "\nKAKU_SHORTCUTS\n"
+      .. "  printf '\\nPress Enter to close...'\n"
+      .. "  IFS= read -r _\n"
+      .. "fi\n"
+  end
+
+  local function open_shortcuts_help_tab(window, pane)
+    local help_text = build_shortcuts_help_text()
+    local script = build_shortcuts_help_script(help_text)
+    window:perform_action(
+      wezterm.action.SpawnCommandInNewTab({
+        args = { '/bin/sh', '-lc', script },
+      }),
+      pane
+    )
+  end
+
+  return {
   -- Window & App
   -- Cmd+K: clear screen + scrollback
-  {
+  kb({
     key = 'k',
     mods = 'CMD',
     action = wezterm.action.Multiple({
       wezterm.action.SendKey({ key = 'l', mods = 'CTRL' }),
       wezterm.action.ClearScrollback('ScrollbackAndViewport'),
     }),
-  },
+  }, 'Editing', 'Cmd+K / Cmd+R', 'Clear Screen + Scrollback'),
 
   -- Compatibility: keep Cmd+R for existing muscle memory
   {
@@ -3381,15 +3477,15 @@ config.keys = {
   },
 
   -- Cmd+N: new window
-  {
+  kb({
     key = 'n',
     mods = 'CMD',
     action = wezterm.action.SpawnWindow,
-  },
+  }, 'Tabs & Window', 'Cmd+N / Cmd+T', 'New Window / New Tab'),
 
   -- Close Behavior
   -- Cmd+W: close pane > close tab > hide app
-  {
+  kb({
     key = 'w',
     mods = 'CMD',
     action = wezterm.action_callback(function(win, pane)
@@ -3408,7 +3504,7 @@ config.keys = {
         win:perform_action(wezterm.action.HideApplication, pane)
       end
     end),
-  },
+  }, 'Tabs & Window', 'Cmd+W / Cmd+Shift+W', 'Close Pane/Tab / Close Tab'),
 
   -- Cmd+Shift+W: close current tab
   {
@@ -3426,11 +3522,11 @@ config.keys = {
   },
 
   -- Cmd+Shift+A: open Kaku AI settings in current pane
-  {
+  kb({
     key = 'A',
     mods = 'CMD|SHIFT',
     action = wezterm.action.EmitEvent('run-kaku-ai-config'),
-  },
+  }, 'Pane & Tools', 'Cmd+Shift+A / E', 'AI Config / Apply Last Suggestion'),
 
   -- Cmd+Shift+E: apply latest Kaku Assistant suggestion for the active pane
   {
@@ -3440,11 +3536,11 @@ config.keys = {
   },
 
   -- Cmd+Shift+G: launch lazygit in current pane
-  {
+  kb({
     key = 'G',
     mods = 'CMD|SHIFT',
     action = wezterm.action.EmitEvent('kaku-launch-lazygit'),
-  },
+  }, 'Pane & Tools', 'Cmd+Shift+G / Y / R', 'Lazygit / Yazi / Remote Files'),
 
   -- Cmd+Shift+Y: launch yazi in current pane
   {
@@ -3462,23 +3558,25 @@ config.keys = {
 
   -- Workspace Sidebar
   -- Cmd+Shift+B: toggle workspace sidebar visibility
-  {
+  kb({
     key = 'B',
     mods = 'CMD|SHIFT',
     action = wezterm.action.EmitEvent('kaku-sidebar-toggle'),
-  },
+  }, 'Sidebar', 'Cmd+Shift+B', 'Toggle Sidebar'),
   -- Cmd+Shift+/: open shortcuts help panel
-  {
+  kb({
     key = '/',
     mods = 'CMD|SHIFT',
-    action = wezterm.action.EmitEvent('kaku-shortcuts-help'),
-  },
+    action = wezterm.action_callback(function(win, pane)
+      open_shortcuts_help_tab(win, pane)
+    end),
+  }, 'Sidebar', 'Cmd+Shift+/', 'Toggle Shortcuts Help'),
   -- Cmd+Option+N: create project
-  {
+  kb({
     key = 'n',
     mods = 'CMD|OPT',
     action = wezterm.action.EmitEvent('kaku-sidebar-create-project'),
-  },
+  }, 'Sidebar', 'Cmd+Opt+N / Cmd+Opt+T', 'New Project / New Session'),
   -- Cmd+Option+T: create session in current project
   {
     key = 't',
@@ -3486,11 +3584,11 @@ config.keys = {
     action = wezterm.action.EmitEvent('kaku-sidebar-create-session'),
   },
   -- Cmd+Option+P: pin/unpin current session
-  {
+  kb({
     key = 'p',
     mods = 'CMD|OPT',
     action = wezterm.action.EmitEvent('kaku-sidebar-toggle-pin'),
-  },
+  }, 'Sidebar', 'Cmd+Opt+P / Cmd+Opt+R', 'Pin/Unpin / Rename Session'),
   -- Cmd+Option+R: rename current session
   {
     key = 'r',
@@ -3498,19 +3596,19 @@ config.keys = {
     action = wezterm.action.EmitEvent('kaku-sidebar-rename-session'),
   },
   -- Cmd+Option+Backspace: delete current session (with confirmation)
-  {
+  kb({
     key = 'Backspace',
     mods = 'CMD|OPT',
     action = wezterm.action.EmitEvent('kaku-sidebar-delete-session'),
-  },
+  }, 'Sidebar', 'Cmd+Opt+Backspace', 'Delete Current Session'),
 
   -- Window Controls
   -- Cmd+Ctrl+F: toggle fullscreen
-  {
+  kb({
     key = 'f',
     mods = 'CMD|CTRL',
     action = wezterm.action.ToggleFullScreen,
-  },
+  }, 'Tabs & Window', 'Cmd+Ctrl+F', 'Toggle Fullscreen'),
 
   -- Cmd+M: minimize window
   {
@@ -3520,11 +3618,11 @@ config.keys = {
   },
 
   -- Cmd+H: hide application
-  {
+  kb({
     key = 'h',
     mods = 'CMD',
     action = wezterm.action.HideApplication,
-  },
+  }, 'Tabs & Window', 'Cmd+H / Cmd+M', 'Hide App / Minimize'),
 
   -- Font Size
   -- Cmd+Equal/Minus/0: adjust font size
@@ -3570,11 +3668,11 @@ config.keys = {
   },
 
   -- Cmd+Backspace: delete to line start
-  {
+  kb({
     key = 'Backspace',
     mods = 'CMD',
     action = wezterm.action.SendKey({ key = 'u', mods = 'CTRL' }),
-  },
+  }, 'Editing', 'Cmd+Backspace / Opt+Backspace', 'Delete Line / Prev Word'),
 
   -- Alt+Backspace: delete word
   {
@@ -3585,11 +3683,11 @@ config.keys = {
 
   -- Layout
   -- Cmd+D: vertical split
-  {
+  kb({
     key = 'd',
     mods = 'CMD',
     action = wezterm.action.SplitHorizontal({ domain = 'CurrentPaneDomain' }),
-  },
+  }, 'Pane & Tools', 'Cmd+D / Cmd+Shift+D', 'Split Vertical / Horizontal'),
 
   -- Cmd+Shift+D: horizontal split
   {
@@ -3599,11 +3697,11 @@ config.keys = {
   },
 
   -- Cmd+Shift+[ / ]: prev/next tab
-  {
+  kb({
     key = '[',
     mods = 'CMD|SHIFT',
     action = wezterm.action.ActivateTabRelative(-1),
-  },
+  }, 'Tabs & Window', 'Cmd+Shift+[ / ]', 'Previous / Next Tab'),
   {
     key = ']',
     mods = 'CMD|SHIFT',
@@ -3612,11 +3710,11 @@ config.keys = {
 
   -- Pane Navigation
   -- Cmd+Option+Arrow: navigate between splits
-  {
+  kb({
     key = 'LeftArrow',
     mods = 'CMD|OPT',
     action = wezterm.action.ActivatePaneDirection('Left'),
-  },
+  }, 'Pane & Tools', 'Cmd+Opt+Arrow', 'Focus Neighbor Pane'),
   {
     key = 'RightArrow',
     mods = 'CMD|OPT',
@@ -3634,11 +3732,11 @@ config.keys = {
   },
 
   -- Cmd+1~9: switch tab
-  {
+  kb({
     key = '1',
     mods = 'CMD',
     action = wezterm.action.ActivateTab(0),
-  },
+  }, 'Tabs & Window', 'Cmd+1..9', 'Switch to Tab 1..9'),
   {
     key = '2',
     mods = 'CMD',
@@ -3682,11 +3780,11 @@ config.keys = {
 
   -- Command Input
   -- Cmd+Enter / Shift+Enter: newline without execute
-  {
+  kb({
     key = 'Enter',
     mods = 'CMD',
     action = wezterm.action.SendString('\n'),
-  },
+  }, 'Editing', 'Cmd+Enter / Shift+Enter', 'Insert Newline'),
   {
     key = 'Enter',
     mods = 'SHIFT',
@@ -3694,11 +3792,11 @@ config.keys = {
   },
 
   -- Cmd+Shift+Enter: Toggle Pane Zoom (Maximize active pane)
-  {
+  kb({
     key = 'Enter',
     mods = 'CMD|SHIFT',
     action = wezterm.action.TogglePaneZoomState,
-  },
+  }, 'Pane & Tools', 'Cmd+Shift+Enter / S', 'Zoom / Toggle Split Direction'),
 
   -- Cmd+Shift+S: Toggle split direction (horizontal <-> vertical)
   {
@@ -3708,11 +3806,11 @@ config.keys = {
   },
 
   -- Cmd+Ctrl+Arrows: Resize panes
-  {
+  kb({
     key = 'LeftArrow',
     mods = 'CMD|CTRL',
     action = wezterm.action.AdjustPaneSize { 'Left', 5 },
-  },
+  }, 'Pane & Tools', 'Cmd+Ctrl+Arrow', 'Resize Pane'),
   {
     key = 'RightArrow',
     mods = 'CMD|CTRL',
@@ -3728,9 +3826,8 @@ config.keys = {
     mods = 'CMD|CTRL',
     action = wezterm.action.AdjustPaneSize { 'Down', 5 },
   },
-
-
-}
+  }
+end)()
 
 -- ===== Mouse Bindings =====
 -- Copy on select (equivalent to Kitty's copy_on_select)
