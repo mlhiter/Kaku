@@ -93,6 +93,7 @@ mod commands;
 mod customglyph;
 mod download;
 mod frontend;
+mod agent_status;
 mod glyphcache;
 mod inputmap;
 mod overlay;

@@ -1,6 +1,9 @@
 #![allow(clippy::range_plus_one)]
 use super::renderstate::*;
 use super::utilsprites::RenderMetrics;
+use crate::agent_status::adapters::AgentAdapterRegistry;
+use crate::agent_status::events::{SessionStatus, SessionStatusConfidence, SessionStatusSource};
+use crate::agent_status::manager::{SessionStatusManager, SessionStatusSnapshot};
 use crate::colorease::ColorEase;
 use crate::frontend::{front_end, try_front_end};
 use crate::inputmap::InputMap;
@@ -843,6 +846,12 @@ pub struct WorkspaceSidebarSession {
     pub id: String,
     pub title: String,
     pub status: String,
+    #[allow(dead_code)]
+    pub status_source: String,
+    #[allow(dead_code)]
+    pub status_confidence: String,
+    #[allow(dead_code)]
+    pub status_reason: String,
     pub pinned: bool,
     pub updated_at: String,
 }
@@ -976,6 +985,8 @@ pub struct TermWindow {
     workspace_sidebar_pending_opens: VecDeque<WorkspaceSidebarPendingOpen>,
     workspace_sidebar_tab_to_session: HashMap<TabId, (String, String)>,
     workspace_sidebar_session_to_tab: HashMap<String, TabId>,
+    agent_status_manager: SessionStatusManager,
+    agent_adapter_registry: AgentAdapterRegistry,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -1561,6 +1572,8 @@ impl TermWindow {
             workspace_sidebar_pending_opens: VecDeque::new(),
             workspace_sidebar_tab_to_session: HashMap::new(),
             workspace_sidebar_session_to_tab: HashMap::new(),
+            agent_status_manager: SessionStatusManager::default(),
+            agent_adapter_registry: AgentAdapterRegistry::with_defaults(),
             last_ui_item: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
@@ -3086,9 +3099,12 @@ impl TermWindow {
         let mux = Mux::get();
         let window = GuiWin::new(self);
         let pane = match mux.get_pane(pane_id) {
-            Some(pane) => mux_lua::MuxPane(pane.pane_id()),
+            Some(pane) => pane,
             None => return,
         };
+        let user_vars = pane.copy_user_vars();
+        self.process_agent_user_var_signal(pane_id, &name, &value, &user_vars);
+        let pane = mux_lua::MuxPane(pane.pane_id());
 
         async fn do_event(
             lua: Option<Rc<mlua::Lua>>,
@@ -3119,6 +3135,75 @@ impl TermWindow {
             do_event(lua, name, value, window, pane)
         }))
         .detach();
+    }
+
+    fn process_agent_user_var_signal(
+        &mut self,
+        pane_id: PaneId,
+        name: &str,
+        value: &str,
+        user_vars: &HashMap<String, String>,
+    ) {
+        let pane_key = pane_id.as_usize().to_string();
+        let events = self
+            .agent_adapter_registry
+            .observe_user_var(&pane_key, name, value, user_vars);
+        if events.is_empty() {
+            return;
+        }
+
+        let Some((project_id, session_id)) = self.sidebar_session_binding_for_pane(pane_id) else {
+            return;
+        };
+        let session_key = format!("{project_id}/{session_id}");
+        if self.agent_status_manager.snapshot(&session_key).is_none() {
+            let initial = self
+                .sidebar_session_status_snapshot(project_id.as_str(), session_id.as_str())
+                .unwrap_or_else(|| {
+                    SessionStatusSnapshot::new(
+                        SessionStatus::Idle,
+                        SessionStatusSource::Heuristic,
+                        SessionStatusConfidence::Low,
+                        None,
+                    )
+                });
+            self.agent_status_manager.register_session(session_key.clone(), initial);
+        }
+
+        for event in events {
+            let transition = match self.agent_status_manager.apply_agent_event(
+                session_key.as_str(),
+                &event,
+                SessionStatusSource::Heuristic,
+                SessionStatusConfidence::Low,
+            ) {
+                Ok(transition) => transition,
+                Err(err) => {
+                    log::warn!(
+                        "agent status transition rejected for {}: {:#}",
+                        session_key,
+                        err
+                    );
+                    continue;
+                }
+            };
+
+            let Some(transition) = transition else {
+                continue;
+            };
+
+            if let Err(err) = self.sidebar_set_session_status_snapshot(
+                project_id.as_str(),
+                session_id.as_str(),
+                &transition.current,
+            ) {
+                log::warn!(
+                    "failed to persist session status for {}: {:#}",
+                    session_key,
+                    err
+                );
+            }
+        }
     }
 
     /// Called by window:set_right_status after the status has

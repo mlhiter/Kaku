@@ -1,3 +1,7 @@
+use crate::agent_status::events::{
+    SessionStatus, SessionStatusConfidence, SessionStatusSource,
+};
+use crate::agent_status::manager::SessionStatusSnapshot;
 use crate::quad::TripleLayerQuadAllocator;
 use crate::spawn::SpawnWhere;
 use crate::termwindow::sidebar_context_menu::{SidebarContextMenuItem, SidebarContextMenuModal};
@@ -8,7 +12,7 @@ use crate::termwindow::{
 use anyhow::{anyhow, bail, Context};
 use chrono::Utc;
 use config::keyassignment::{SpawnCommand, SpawnTabDomain};
-use mux::pane::CachePolicy;
+use mux::pane::{CachePolicy, PaneId};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
 use mux::Mux;
@@ -89,6 +93,12 @@ struct SessionEntry {
     title: String,
     #[serde(default)]
     status: String,
+    #[serde(default)]
+    status_source: String,
+    #[serde(default)]
+    status_confidence: String,
+    #[serde(default)]
+    status_reason: String,
     #[serde(default)]
     pinned: bool,
     #[serde(default)]
@@ -199,14 +209,14 @@ enum SidebarSessionStatus {
 
 impl SidebarSessionStatus {
     fn parse(value: &str) -> Self {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "idle" => Self::Idle,
-            "loading" => Self::Loading,
-            "need_approve" | "need-approve" | "needapprove" => Self::NeedApprove,
-            "running" => Self::Running,
-            "done" => Self::Done,
-            "error" => Self::Error,
-            _ => Self::Unknown,
+        match SessionStatus::parse_storage(value) {
+            Some(SessionStatus::Idle) => Self::Idle,
+            Some(SessionStatus::Loading) => Self::Loading,
+            Some(SessionStatus::NeedApprove) => Self::NeedApprove,
+            Some(SessionStatus::Running) => Self::Running,
+            Some(SessionStatus::Done) => Self::Done,
+            Some(SessionStatus::Error) => Self::Error,
+            None => Self::Unknown,
         }
     }
 
@@ -499,6 +509,82 @@ impl crate::TermWindow {
         let mux = Mux::get();
         let tab_id = mux.get_active_tab_for_window(self.mux_window_id)?.tab_id();
         self.workspace_sidebar_tab_to_session.get(&tab_id).cloned()
+    }
+
+    pub(crate) fn sidebar_session_binding_for_pane(
+        &mut self,
+        pane_id: PaneId,
+    ) -> Option<(String, String)> {
+        self.prune_workspace_sidebar_tab_bindings();
+        let mux = Mux::get();
+        let (_, window_id, tab_id) = mux.resolve_pane_id(pane_id)?;
+        if window_id != self.mux_window_id {
+            return None;
+        }
+        self.workspace_sidebar_tab_to_session.get(&tab_id).cloned()
+    }
+
+    pub(crate) fn sidebar_session_status_snapshot(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+    ) -> Option<SessionStatusSnapshot> {
+        self.refresh_workspace_sidebar_if_needed();
+        let project = self
+            .workspace_sidebar
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)?;
+        let session = project
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)?;
+
+        let status = SessionStatus::parse_storage(session.status.as_str()).unwrap_or(SessionStatus::Idle);
+        let source = SessionStatusSource::parse_storage(session.status_source.as_str())
+            .unwrap_or(SessionStatusSource::Heuristic);
+        let confidence = SessionStatusConfidence::parse_storage(session.status_confidence.as_str())
+            .unwrap_or(SessionStatusConfidence::Low);
+        let reason = if session.status_reason.trim().is_empty() {
+            None
+        } else {
+            Some(session.status_reason.clone())
+        };
+
+        Some(SessionStatusSnapshot::new(status, source, confidence, reason))
+    }
+
+    pub(crate) fn sidebar_set_session_status_snapshot(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        snapshot: &SessionStatusSnapshot,
+    ) -> anyhow::Result<()> {
+        let sessions_path = sidebar_state_root()
+            .join("projects")
+            .join(project_id)
+            .join("sessions.json");
+        if !sessions_path.exists() {
+            bail!("sessions file not found: {}", sessions_path.display());
+        }
+
+        let mut sessions_file: SessionsFile = read_json_file(&sessions_path)?;
+        let session = sessions_file
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| anyhow!("session not found in storage: {session_id}"))?;
+
+        let updated_at = Utc::now().to_rfc3339();
+        session.status = snapshot.status.as_storage_str().to_string();
+        session.status_source = snapshot.source.as_storage_str().to_string();
+        session.status_confidence = snapshot.confidence.as_storage_str().to_string();
+        session.status_reason = snapshot.reason.clone().unwrap_or_default();
+        session.updated_at = updated_at;
+        write_json_file_atomic(&sessions_path, &sessions_file)?;
+
+        self.force_workspace_sidebar_refresh();
+        Ok(())
     }
 
     fn sidebar_active_project_for_shortcuts(&mut self) -> Option<String> {
@@ -929,10 +1015,25 @@ impl crate::TermWindow {
                             id: session.id,
                             title: session.title,
                             status: if session.status.is_empty() {
-                                "idle".to_string()
+                                SessionStatus::Idle.as_storage_str().to_string()
                             } else {
                                 session.status
                             },
+                            status_source: if session.status_source.is_empty() {
+                                SessionStatusSource::Heuristic
+                                    .as_storage_str()
+                                    .to_string()
+                            } else {
+                                session.status_source
+                            },
+                            status_confidence: if session.status_confidence.is_empty() {
+                                SessionStatusConfidence::Low
+                                    .as_storage_str()
+                                    .to_string()
+                            } else {
+                                session.status_confidence
+                            },
+                            status_reason: session.status_reason,
                             pinned: session.pinned,
                             updated_at: session.updated_at,
                         })
@@ -1170,7 +1271,10 @@ impl crate::TermWindow {
         sessions_file.sessions.push(SessionEntry {
             id: session_id.clone(),
             title,
-            status: "idle".to_string(),
+            status: SessionStatus::Idle.as_storage_str().to_string(),
+            status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+            status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+            status_reason: String::new(),
             pinned: false,
             updated_at: now.clone(),
         });
@@ -2333,6 +2437,9 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 
 #[cfg(test)]
 mod tests {
+    use crate::agent_status::events::{
+        SessionStatus, SessionStatusConfidence, SessionStatusSource,
+    };
     use super::{
         sidebar_action_needs_pointer_position, sidebar_next_session_title, SessionEntry,
         SidebarAction, SidebarLineTone, SidebarSessionStatus,
@@ -2390,14 +2497,20 @@ mod tests {
             SessionEntry {
                 id: "sess_1".to_string(),
                 title: "session-1".to_string(),
-                status: "idle".to_string(),
+                status: SessionStatus::Idle.as_storage_str().to_string(),
+                status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                status_reason: String::new(),
                 pinned: false,
                 updated_at: String::new(),
             },
             SessionEntry {
                 id: "sess_2".to_string(),
                 title: "session-2".to_string(),
-                status: "idle".to_string(),
+                status: SessionStatus::Idle.as_storage_str().to_string(),
+                status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                status_reason: String::new(),
                 pinned: false,
                 updated_at: String::new(),
             },
