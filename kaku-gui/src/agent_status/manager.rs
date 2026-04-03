@@ -37,7 +37,9 @@ pub struct SessionStatusTransition {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStatusError {
-    SessionNotRegistered { session_id: String },
+    SessionNotRegistered {
+        session_id: String,
+    },
     InvalidTransition {
         session_id: String,
         from: SessionStatus,
@@ -94,13 +96,11 @@ impl SessionStatusManager {
         session_id: &str,
         next: SessionStatusSnapshot,
     ) -> Result<Option<SessionStatusTransition>, SessionStatusError> {
-        let current = self
-            .sessions
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| SessionStatusError::SessionNotRegistered {
+        let current = self.sessions.get(session_id).cloned().ok_or_else(|| {
+            SessionStatusError::SessionNotRegistered {
                 session_id: session_id.to_string(),
-            })?;
+            }
+        })?;
 
         if current == next {
             return Ok(None);
@@ -141,9 +141,7 @@ pub fn map_agent_event_to_status(event: &AgentEvent) -> (SessionStatus, Option<S
     match event {
         AgentEvent::TaskStarted { .. } => (SessionStatus::Loading, None),
         AgentEvent::TaskOutput { .. } => (SessionStatus::Running, None),
-        AgentEvent::ApprovalRequired { detail, .. } => {
-            (SessionStatus::NeedApprove, detail.clone())
-        }
+        AgentEvent::ApprovalRequired { detail, .. } => (SessionStatus::NeedApprove, detail.clone()),
         AgentEvent::ApprovalResolved { approved, .. } => {
             if *approved {
                 (SessionStatus::Running, None)
@@ -164,30 +162,51 @@ pub fn is_transition_allowed(from: SessionStatus, to: SessionStatus) -> bool {
         return true;
     }
 
+    // Runtime signals can be lossy/out-of-order (especially heuristic output sampling).
+    // Keep transitions permissive enough to avoid dropping valid running/approval states.
     match from {
-        SessionStatus::Idle => matches!(to, SessionStatus::Loading | SessionStatus::Running),
+        SessionStatus::Idle => matches!(
+            to,
+            SessionStatus::Loading | SessionStatus::Running | SessionStatus::NeedApprove
+        ),
         SessionStatus::Loading => matches!(
             to,
             SessionStatus::Idle
                 | SessionStatus::Running
+                | SessionStatus::NeedApprove
                 | SessionStatus::Done
                 | SessionStatus::Error
         ),
         SessionStatus::Running => matches!(
             to,
             SessionStatus::Idle
+                | SessionStatus::Loading
                 | SessionStatus::NeedApprove
                 | SessionStatus::Done
                 | SessionStatus::Error
         ),
-        SessionStatus::NeedApprove => {
-            matches!(
-                to,
-                SessionStatus::Idle | SessionStatus::Running | SessionStatus::Error
-            )
-        }
-        SessionStatus::Done => matches!(to, SessionStatus::Idle | SessionStatus::Loading),
-        SessionStatus::Error => matches!(to, SessionStatus::Idle | SessionStatus::Loading),
+        SessionStatus::NeedApprove => matches!(
+            to,
+            SessionStatus::Idle
+                | SessionStatus::Loading
+                | SessionStatus::Running
+                | SessionStatus::Done
+                | SessionStatus::Error
+        ),
+        SessionStatus::Done => matches!(
+            to,
+            SessionStatus::Idle
+                | SessionStatus::Loading
+                | SessionStatus::Running
+                | SessionStatus::NeedApprove
+        ),
+        SessionStatus::Error => matches!(
+            to,
+            SessionStatus::Idle
+                | SessionStatus::Loading
+                | SessionStatus::Running
+                | SessionStatus::NeedApprove
+        ),
     }
 }
 
@@ -218,13 +237,33 @@ mod tests {
             SessionStatus::Running,
             SessionStatus::NeedApprove
         ));
-        assert!(!is_transition_allowed(
+        assert!(is_transition_allowed(
             SessionStatus::Done,
             SessionStatus::NeedApprove
         ));
         assert!(!is_transition_allowed(
             SessionStatus::Error,
             SessionStatus::Done
+        ));
+    }
+
+    #[test]
+    fn allows_recovery_transitions_for_partial_signal_streams() {
+        assert!(is_transition_allowed(
+            SessionStatus::Idle,
+            SessionStatus::NeedApprove
+        ));
+        assert!(is_transition_allowed(
+            SessionStatus::Done,
+            SessionStatus::Running
+        ));
+        assert!(is_transition_allowed(
+            SessionStatus::Error,
+            SessionStatus::Running
+        ));
+        assert!(is_transition_allowed(
+            SessionStatus::Running,
+            SessionStatus::Loading
         ));
     }
 
@@ -247,9 +286,9 @@ mod tests {
     #[test]
     fn rejects_invalid_transition() {
         let mut manager = SessionStatusManager::default();
-        manager.register_session("sess-1", default_snapshot(SessionStatus::Done));
+        manager.register_session("sess-1", default_snapshot(SessionStatus::Error));
         let err = manager
-            .update_status("sess-1", default_snapshot(SessionStatus::NeedApprove))
+            .update_status("sess-1", default_snapshot(SessionStatus::Done))
             .expect_err("must reject invalid transition");
         let message = err.to_string();
         assert!(message.contains("invalid session status transition"));
@@ -322,6 +361,43 @@ mod tests {
         assert_eq!(
             manager.snapshot("sess-1").expect("snapshot").status,
             SessionStatus::Done
+        );
+    }
+
+    #[test]
+    fn applies_partial_stream_events_after_done_state() {
+        let mut manager = SessionStatusManager::default();
+        manager.register_session("sess-1", default_snapshot(SessionStatus::Done));
+
+        manager
+            .apply_agent_event(
+                "sess-1",
+                &AgentEvent::TaskOutput {
+                    provider: "codex".to_string(),
+                },
+                SessionStatusSource::Heuristic,
+                SessionStatusConfidence::Low,
+            )
+            .expect("task output should recover to running");
+        assert_eq!(
+            manager.snapshot("sess-1").expect("snapshot").status,
+            SessionStatus::Running
+        );
+
+        manager
+            .apply_agent_event(
+                "sess-1",
+                &AgentEvent::ApprovalRequired {
+                    provider: "codex".to_string(),
+                    detail: Some("approval needed".to_string()),
+                },
+                SessionStatusSource::Heuristic,
+                SessionStatusConfidence::Low,
+            )
+            .expect("approval should be accepted after recovered running");
+        assert_eq!(
+            manager.snapshot("sess-1").expect("snapshot").status,
+            SessionStatus::NeedApprove
         );
     }
 }

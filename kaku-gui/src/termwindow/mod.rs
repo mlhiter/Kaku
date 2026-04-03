@@ -2,7 +2,6 @@
 use super::renderstate::*;
 use super::utilsprites::RenderMetrics;
 use crate::agent_status::adapters::AgentAdapterRegistry;
-use crate::agent_status::events::{SessionStatus, SessionStatusConfidence, SessionStatusSource};
 use crate::agent_status::manager::{SessionStatusManager, SessionStatusSnapshot};
 use crate::colorease::ColorEase;
 use crate::frontend::{front_end, try_front_end};
@@ -76,6 +75,7 @@ use wezterm_term::input::LastMouseClick;
 use wezterm_term::{Alert, Progress, StableRowIndex, TerminalConfiguration, TerminalSize};
 use wezterm_toast_notification::ToastNotification;
 
+mod agent_status_bridge;
 pub mod background;
 pub mod box_model;
 pub mod charselect;
@@ -167,6 +167,13 @@ struct FileLinkTarget {
     path: PathBuf,
     line: Option<usize>,
     col: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSessionStatusWrite {
+    project_id: String,
+    session_id: String,
+    snapshot: SessionStatusSnapshot,
 }
 
 fn decode_hex_event_payload(payload: &str) -> Option<String> {
@@ -987,6 +994,10 @@ pub struct TermWindow {
     workspace_sidebar_session_to_tab: HashMap<String, TabId>,
     agent_status_manager: SessionStatusManager,
     agent_adapter_registry: AgentAdapterRegistry,
+    pending_session_status_writes: HashMap<String, PendingSessionStatusWrite>,
+    session_status_flush_scheduled: bool,
+    agent_output_probe_at_by_pane: HashMap<PaneId, Instant>,
+    agent_output_probe_grace_until_by_pane: HashMap<PaneId, Instant>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -1054,6 +1065,7 @@ impl TermWindow {
     }
 
     fn close_requested(&mut self, _window: &Window) {
+        self.flush_pending_session_status_writes();
         let mux = Mux::get();
         match self.config.window_close_confirmation {
             WindowCloseConfirmation::NeverPrompt => {
@@ -1574,6 +1586,10 @@ impl TermWindow {
             workspace_sidebar_session_to_tab: HashMap::new(),
             agent_status_manager: SessionStatusManager::default(),
             agent_adapter_registry: AgentAdapterRegistry::with_defaults(),
+            pending_session_status_writes: HashMap::new(),
+            session_status_flush_scheduled: false,
+            agent_output_probe_at_by_pane: HashMap::new(),
+            agent_output_probe_grace_until_by_pane: HashMap::new(),
             last_ui_item: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
@@ -2210,6 +2226,8 @@ impl TermWindow {
                             front_end().adjust_unread_bell_count(-1);
                         }
                     }
+                    self.agent_output_probe_at_by_pane.remove(&pane_id);
+                    self.agent_output_probe_grace_until_by_pane.remove(&pane_id);
                 }
                 MuxNotification::PaneAdded(_)
                 | MuxNotification::WorkspaceRenamed { .. }
@@ -2358,6 +2376,7 @@ impl TermWindow {
                 win.invalidate();
             }
         }
+        self.process_agent_pane_output_signal(pane_id);
     }
 
     fn mux_pane_output_event_callback(
@@ -3135,75 +3154,6 @@ impl TermWindow {
             do_event(lua, name, value, window, pane)
         }))
         .detach();
-    }
-
-    fn process_agent_user_var_signal(
-        &mut self,
-        pane_id: PaneId,
-        name: &str,
-        value: &str,
-        user_vars: &HashMap<String, String>,
-    ) {
-        let pane_key = pane_id.as_usize().to_string();
-        let events = self
-            .agent_adapter_registry
-            .observe_user_var(&pane_key, name, value, user_vars);
-        if events.is_empty() {
-            return;
-        }
-
-        let Some((project_id, session_id)) = self.sidebar_session_binding_for_pane(pane_id) else {
-            return;
-        };
-        let session_key = format!("{project_id}/{session_id}");
-        if self.agent_status_manager.snapshot(&session_key).is_none() {
-            let initial = self
-                .sidebar_session_status_snapshot(project_id.as_str(), session_id.as_str())
-                .unwrap_or_else(|| {
-                    SessionStatusSnapshot::new(
-                        SessionStatus::Idle,
-                        SessionStatusSource::Heuristic,
-                        SessionStatusConfidence::Low,
-                        None,
-                    )
-                });
-            self.agent_status_manager.register_session(session_key.clone(), initial);
-        }
-
-        for event in events {
-            let transition = match self.agent_status_manager.apply_agent_event(
-                session_key.as_str(),
-                &event,
-                SessionStatusSource::Heuristic,
-                SessionStatusConfidence::Low,
-            ) {
-                Ok(transition) => transition,
-                Err(err) => {
-                    log::warn!(
-                        "agent status transition rejected for {}: {:#}",
-                        session_key,
-                        err
-                    );
-                    continue;
-                }
-            };
-
-            let Some(transition) = transition else {
-                continue;
-            };
-
-            if let Err(err) = self.sidebar_set_session_status_snapshot(
-                project_id.as_str(),
-                session_id.as_str(),
-                &transition.current,
-            ) {
-                log::warn!(
-                    "failed to persist session status for {}: {:#}",
-                    session_key,
-                    err
-                );
-            }
-        }
     }
 
     /// Called by window:set_right_status after the status has
@@ -4146,12 +4096,18 @@ impl TermWindow {
                     });
                 } else if name == "kaku-sidebar-create-project" {
                     if let Err(err) = self.sidebar_shortcut_create_project() {
-                        log::warn!("workspace sidebar shortcut create-project failed: {:#}", err);
+                        log::warn!(
+                            "workspace sidebar shortcut create-project failed: {:#}",
+                            err
+                        );
                         self.show_toast("Failed to create project".to_string());
                     }
                 } else if name == "kaku-sidebar-create-session" {
                     if let Err(err) = self.sidebar_shortcut_create_session() {
-                        log::warn!("workspace sidebar shortcut create-session failed: {:#}", err);
+                        log::warn!(
+                            "workspace sidebar shortcut create-session failed: {:#}",
+                            err
+                        );
                         self.show_toast("Failed to create session".to_string());
                     }
                 } else if name == "kaku-sidebar-toggle-pin" {
@@ -4161,12 +4117,18 @@ impl TermWindow {
                     }
                 } else if name == "kaku-sidebar-rename-session" {
                     if let Err(err) = self.sidebar_shortcut_rename_current_session() {
-                        log::warn!("workspace sidebar shortcut rename-session failed: {:#}", err);
+                        log::warn!(
+                            "workspace sidebar shortcut rename-session failed: {:#}",
+                            err
+                        );
                         self.show_toast("Failed to rename session".to_string());
                     }
                 } else if name == "kaku-sidebar-delete-session" {
                     if let Err(err) = self.sidebar_shortcut_delete_current_session() {
-                        log::warn!("workspace sidebar shortcut delete-session failed: {:#}", err);
+                        log::warn!(
+                            "workspace sidebar shortcut delete-session failed: {:#}",
+                            err
+                        );
                         self.show_toast("Failed to delete session".to_string());
                     }
                 } else if let Some(msg) = lookup_kaku_toast(name) {

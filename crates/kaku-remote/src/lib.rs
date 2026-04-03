@@ -295,7 +295,11 @@ async fn handle_ws(
     if let Some(update) = capture_pane(pane_id) {
         if let Ok(json) = serde_json::to_string(&update) {
             if let Err(e) = sender.send(ws::Message::Text(json.into())).await {
-                log::debug!("kaku-remote: failed to send initial snapshot for pane {}: {:?}", pane_id, e);
+                log::debug!(
+                    "kaku-remote: failed to send initial snapshot for pane {}: {:?}",
+                    pane_id,
+                    e
+                );
             }
         }
     }
@@ -329,7 +333,11 @@ async fn handle_ws(
             if let Some(mux) = Mux::try_get() {
                 if let Some(pane) = mux.get_pane(mux::pane::PaneId::from(pane_id)) {
                     if let Err(e) = pane.writer().write_all(input.as_bytes()) {
-                        log::debug!("kaku-remote: failed to write input to pane {}: {}", pane_id, e);
+                        log::debug!(
+                            "kaku-remote: failed to write input to pane {}: {}",
+                            pane_id,
+                            e
+                        );
                     }
                 }
             }
@@ -352,7 +360,11 @@ fn on_pane_output(pane_id: usize, senders: PaneSenders) {
         }
         if let Some(update) = capture_pane(pane_id) {
             if let Err(e) = tx.send(update) {
-                log::debug!("kaku-remote: failed to broadcast update for pane {}: {:?}", pane_id, e);
+                log::debug!(
+                    "kaku-remote: failed to broadcast update for pane {}: {:?}",
+                    pane_id,
+                    e
+                );
             }
         }
     }

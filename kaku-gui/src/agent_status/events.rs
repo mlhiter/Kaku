@@ -115,7 +115,10 @@ mod tests {
 
     #[test]
     fn parse_storage_status_aliases() {
-        assert_eq!(SessionStatus::parse_storage("idle"), Some(SessionStatus::Idle));
+        assert_eq!(
+            SessionStatus::parse_storage("idle"),
+            Some(SessionStatus::Idle)
+        );
         assert_eq!(
             SessionStatus::parse_storage("need-approve"),
             Some(SessionStatus::NeedApprove)

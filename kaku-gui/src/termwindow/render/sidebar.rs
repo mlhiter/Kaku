@@ -1,6 +1,4 @@
-use crate::agent_status::events::{
-    SessionStatus, SessionStatusConfidence, SessionStatusSource,
-};
+use crate::agent_status::events::{SessionStatus, SessionStatusConfidence, SessionStatusSource};
 use crate::agent_status::manager::SessionStatusSnapshot;
 use crate::quad::TripleLayerQuadAllocator;
 use crate::spawn::SpawnWhere;
@@ -10,7 +8,7 @@ use crate::termwindow::{
     WorkspaceSidebarPendingOpen, WorkspaceSidebarProject, WorkspaceSidebarSession,
 };
 use anyhow::{anyhow, bail, Context};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use config::keyassignment::{SpawnCommand, SpawnTabDomain};
 use mux::pane::{CachePolicy, PaneId};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
@@ -34,6 +32,7 @@ const SIDEBAR_MAX_WIDTH_PX: usize = 620;
 const SIDEBAR_DEFAULT_VISIBLE: bool = true;
 const SIDEBAR_RESIZE_HANDLE_WIDTH_PX: usize = 8;
 const SIDEBAR_REFRESH_INTERVAL: Duration = Duration::from_millis(1200);
+const SIDEBAR_TRANSIENT_STATUS_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 const SIDEBAR_TEXT_LEFT_PADDING: f32 = 12.0;
 const SIDEBAR_TEXT_TOP_PADDING: f32 = 12.0;
 const SIDEBAR_UI_STATE_RELATIVE_PATH: &str = "gui/sidebar.json";
@@ -175,11 +174,7 @@ impl SidebarLine {
         self
     }
 
-    fn with_trailing_button(
-        mut self,
-        label: &'static str,
-        action: SidebarAction,
-    ) -> Self {
+    fn with_trailing_button(mut self, label: &'static str, action: SidebarAction) -> Self {
         self.trailing_buttons
             .push(SidebarTrailingButton { label, action });
         self
@@ -521,7 +516,106 @@ impl crate::TermWindow {
         if window_id != self.mux_window_id {
             return None;
         }
-        self.workspace_sidebar_tab_to_session.get(&tab_id).cloned()
+        if let Some(binding) = self.workspace_sidebar_tab_to_session.get(&tab_id).cloned() {
+            return Some(binding);
+        }
+
+        self.sidebar_infer_session_binding_for_tab(pane_id, tab_id)
+    }
+
+    fn sidebar_infer_session_binding_for_tab(
+        &mut self,
+        pane_id: PaneId,
+        tab_id: TabId,
+    ) -> Option<(String, String)> {
+        self.refresh_workspace_sidebar_if_needed();
+        let mux = Mux::get();
+        let pane = mux.get_pane(pane_id)?;
+        let cwd = pane
+            .get_current_working_dir(CachePolicy::FetchImmediate)
+            .or_else(|| pane.get_current_working_dir(CachePolicy::AllowStale))
+            .and_then(|url| url.to_file_path().ok())
+            .or_else(|| std::env::current_dir().ok())
+            .or_else(|| Some(config::HOME_DIR.clone()))?;
+        let mut project_id = pick_project_for_cwd(&self.workspace_sidebar.projects, cwd.as_path())
+            .map(|project| project.id.clone());
+        if project_id.is_none() {
+            match ensure_sidebar_project_for_cwd(cwd.as_path()) {
+                Ok(created_project_id) => {
+                    log::info!(
+                        "workspace sidebar: auto-registered project for pane={} cwd={} project={}",
+                        pane_id,
+                        cwd.display(),
+                        created_project_id
+                    );
+                    project_id = Some(created_project_id);
+                    self.force_workspace_sidebar_refresh();
+                }
+                Err(err) => {
+                    log::warn!(
+                        "workspace sidebar: failed to auto-register project for pane={} cwd={} err={:#}",
+                        pane_id,
+                        cwd.display(),
+                        err
+                    );
+                }
+            }
+        }
+        let project_id = project_id?;
+
+        let tab_title = mux
+            .get_tab(tab_id)
+            .map(|tab| tab.get_title())
+            .unwrap_or_default();
+        let bound_session_keys: HashSet<String> = self
+            .workspace_sidebar_session_to_tab
+            .keys()
+            .cloned()
+            .collect();
+        let mut session_id = self
+            .workspace_sidebar
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| {
+                pick_session_for_inferred_binding(project, &bound_session_keys, tab_title.as_str())
+            })
+            .map(|session| session.id.clone());
+        if session_id.is_none() {
+            match ensure_sidebar_project_has_session(project_id.as_str()) {
+                Ok(ensured_session_id) => {
+                    log::info!(
+                        "workspace sidebar: auto-created session for pane={} tab={} project={} session={}",
+                        pane_id,
+                        tab_id,
+                        project_id,
+                        ensured_session_id
+                    );
+                    session_id = Some(ensured_session_id);
+                    self.force_workspace_sidebar_refresh();
+                }
+                Err(err) => {
+                    log::warn!(
+                        "workspace sidebar: failed to ensure session for pane={} tab={} project={} err={:#}",
+                        pane_id,
+                        tab_id,
+                        project_id,
+                        err
+                    );
+                }
+            }
+        }
+        let session_id = session_id?;
+        self.sidebar_bind_session_to_tab(project_id.as_str(), session_id.as_str(), tab_id);
+        log::info!(
+            "workspace sidebar: inferred tab binding pane={} tab={} cwd={} -> {}/{}",
+            pane_id,
+            tab_id,
+            cwd.display(),
+            project_id,
+            session_id
+        );
+        Some((project_id, session_id))
     }
 
     pub(crate) fn sidebar_session_status_snapshot(
@@ -540,7 +634,8 @@ impl crate::TermWindow {
             .iter()
             .find(|session| session.id == session_id)?;
 
-        let status = SessionStatus::parse_storage(session.status.as_str()).unwrap_or(SessionStatus::Idle);
+        let status =
+            SessionStatus::parse_storage(session.status.as_str()).unwrap_or(SessionStatus::Idle);
         let source = SessionStatusSource::parse_storage(session.status_source.as_str())
             .unwrap_or(SessionStatusSource::Heuristic);
         let confidence = SessionStatusConfidence::parse_storage(session.status_confidence.as_str())
@@ -551,7 +646,9 @@ impl crate::TermWindow {
             Some(session.status_reason.clone())
         };
 
-        Some(SessionStatusSnapshot::new(status, source, confidence, reason))
+        Some(SessionStatusSnapshot::new(
+            status, source, confidence, reason,
+        ))
     }
 
     pub(crate) fn sidebar_set_session_status_snapshot(
@@ -594,7 +691,11 @@ impl crate::TermWindow {
 
         self.refresh_workspace_sidebar_if_needed();
         if self.workspace_sidebar.projects.len() == 1 {
-            return self.workspace_sidebar.projects.first().map(|project| project.id.clone());
+            return self
+                .workspace_sidebar
+                .projects
+                .first()
+                .map(|project| project.id.clone());
         }
 
         None
@@ -999,6 +1100,7 @@ impl crate::TermWindow {
 
         let projects_file: ProjectsFile = read_json_file(&projects_path)?;
         let mut projects: Vec<WorkspaceSidebarProject> = Vec::new();
+        let now = Utc::now();
 
         for project in projects_file.projects {
             let sessions_path = root
@@ -1008,36 +1110,64 @@ impl crate::TermWindow {
 
             let mut sessions = if sessions_path.exists() {
                 match read_json_file::<SessionsFile>(&sessions_path) {
-                    Ok(file) => file
-                        .sessions
-                        .into_iter()
-                        .map(|session| WorkspaceSidebarSession {
-                            id: session.id,
-                            title: session.title,
-                            status: if session.status.is_empty() {
-                                SessionStatus::Idle.as_storage_str().to_string()
-                            } else {
-                                session.status
-                            },
-                            status_source: if session.status_source.is_empty() {
-                                SessionStatusSource::Heuristic
-                                    .as_storage_str()
-                                    .to_string()
-                            } else {
-                                session.status_source
-                            },
-                            status_confidence: if session.status_confidence.is_empty() {
-                                SessionStatusConfidence::Low
-                                    .as_storage_str()
-                                    .to_string()
-                            } else {
-                                session.status_confidence
-                            },
-                            status_reason: session.status_reason,
-                            pinned: session.pinned,
-                            updated_at: session.updated_at,
-                        })
-                        .collect(),
+                    Ok(mut file) => {
+                        let mut repaired = false;
+                        for session in &mut file.sessions {
+                            if session.status.is_empty() {
+                                session.status = SessionStatus::Idle.as_storage_str().to_string();
+                                repaired = true;
+                            }
+                            if session.status_source.is_empty() {
+                                session.status_source =
+                                    SessionStatusSource::Heuristic.as_storage_str().to_string();
+                                repaired = true;
+                            }
+                            if session.status_confidence.is_empty() {
+                                session.status_confidence =
+                                    SessionStatusConfidence::Low.as_storage_str().to_string();
+                                repaired = true;
+                            }
+
+                            let normalized_status = normalize_transient_session_status(
+                                session.status.as_str(),
+                                session.updated_at.as_str(),
+                                now,
+                            );
+                            if normalized_status != session.status {
+                                session.status = normalized_status;
+                                session.status_source =
+                                    SessionStatusSource::Heuristic.as_storage_str().to_string();
+                                session.status_confidence =
+                                    SessionStatusConfidence::Low.as_storage_str().to_string();
+                                session.status_reason.clear();
+                                repaired = true;
+                            }
+                        }
+
+                        if repaired {
+                            if let Err(err) = write_json_file_atomic(&sessions_path, &file) {
+                                log::warn!(
+                                    "workspace sidebar: failed to persist repaired sessions {}: {:#}",
+                                    sessions_path.display(),
+                                    err
+                                );
+                            }
+                        }
+
+                        file.sessions
+                            .into_iter()
+                            .map(|session| WorkspaceSidebarSession {
+                                id: session.id,
+                                title: session.title,
+                                status: session.status,
+                                status_source: session.status_source,
+                                status_confidence: session.status_confidence,
+                                status_reason: session.status_reason,
+                                pinned: session.pinned,
+                                updated_at: session.updated_at,
+                            })
+                            .collect()
+                    }
                     Err(err) => {
                         log::warn!(
                             "workspace sidebar: failed to read sessions {}: {:#}",
@@ -1091,14 +1221,20 @@ impl crate::TermWindow {
         for project in &self.workspace_sidebar.projects {
             lines.push(
                 SidebarLine::action(
-                    format!("- {}", truncate_middle(project.name.as_str(), line_char_budget)),
+                    format!(
+                        "- {}",
+                        truncate_middle(project.name.as_str(), line_char_budget)
+                    ),
                     SidebarAction::ProjectRow {
                         project_id: project.id.clone(),
                     },
                 )
-                .with_trailing_button("+", SidebarAction::CreateSessionInProject {
-                    project_id: project.id.clone(),
-                })
+                .with_trailing_button(
+                    "+",
+                    SidebarAction::CreateSessionInProject {
+                        project_id: project.id.clone(),
+                    },
+                )
                 .with_trailing_button(
                     "⋯",
                     SidebarAction::OpenProjectContextMenu {
@@ -1118,11 +1254,7 @@ impl crate::TermWindow {
             for session in project.sessions.iter().take(8) {
                 let pin = if session.pinned { "📌" } else { "·" };
                 let status = SidebarSessionStatus::parse(session.status.as_str());
-                let status_chip = if status == SidebarSessionStatus::Idle {
-                    format!("[{pin}]")
-                } else {
-                    format!("[{pin}|{}]", status.badge())
-                };
+                let status_chip = format!("[{pin}|{}]", status.badge());
                 lines.push(
                     SidebarLine::action(
                         format!(
@@ -1758,7 +1890,11 @@ impl crate::TermWindow {
             .find(|project| project.id == project_id)
             .map(|project| {
                 let sessions = project.sessions.len();
-                let pinned = project.sessions.iter().filter(|session| session.pinned).count();
+                let pinned = project
+                    .sessions
+                    .iter()
+                    .filter(|session| session.pinned)
+                    .count();
                 (sessions, pinned)
             })
             .unwrap_or((0, 0));
@@ -2210,6 +2346,206 @@ fn sidebar_session_key(project_id: &str, session_id: &str) -> String {
     format!("{project_id}::{session_id}")
 }
 
+fn ensure_sidebar_project_for_cwd(cwd: &Path) -> anyhow::Result<String> {
+    let root_path = normalize_root_path(cwd)?;
+    let projects_path = sidebar_state_root().join("projects.json");
+    let mut projects_file: ProjectsFile = read_json_file_or_default(&projects_path)?;
+    let now = Utc::now().to_rfc3339();
+
+    if let Some(existing_idx) = projects_file
+        .projects
+        .iter()
+        .position(|project| project.root_path == root_path)
+    {
+        let mut needs_write = false;
+        let project_id = {
+            let project = projects_file
+                .projects
+                .get_mut(existing_idx)
+                .ok_or_else(|| anyhow!("project index out of bounds"))?;
+            if project.last_active_at.is_empty() {
+                project.last_active_at = now.clone();
+                needs_write = true;
+            }
+            project.id.clone()
+        };
+        if needs_write {
+            write_json_file_atomic(&projects_path, &projects_file)?;
+        }
+        return Ok(project_id);
+    }
+
+    let project_id = generate_sidebar_id("proj");
+    let project_name = short_project_path(root_path.as_str());
+    projects_file.projects.push(ProjectEntry {
+        id: project_id.clone(),
+        name: project_name,
+        root_path,
+        created_at: now.clone(),
+        last_active_at: now,
+    });
+    write_json_file_atomic(&projects_path, &projects_file)?;
+
+    let _ = ensure_sidebar_project_has_session(project_id.as_str())?;
+    Ok(project_id)
+}
+
+fn ensure_sidebar_project_has_session(project_id: &str) -> anyhow::Result<String> {
+    let sessions_path = sidebar_state_root()
+        .join("projects")
+        .join(project_id)
+        .join("sessions.json");
+    let mut sessions_file: SessionsFile = read_json_file_or_default(&sessions_path)?;
+
+    if sessions_file.sessions.is_empty() {
+        let now = Utc::now().to_rfc3339();
+        let session_id = generate_sidebar_id("sess");
+        sessions_file.sessions.push(SessionEntry {
+            id: session_id.clone(),
+            title: "session-1".to_string(),
+            status: SessionStatus::Idle.as_storage_str().to_string(),
+            status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+            status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+            status_reason: String::new(),
+            pinned: false,
+            updated_at: now,
+        });
+        write_json_file_atomic(&sessions_path, &sessions_file)?;
+        return Ok(session_id);
+    }
+
+    let selected = sessions_file
+        .sessions
+        .iter()
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+        .ok_or_else(|| anyhow!("project has no sessions after load: {project_id}"))?;
+    Ok(selected.id.clone())
+}
+
+fn pick_project_for_cwd<'a>(
+    projects: &'a [WorkspaceSidebarProject],
+    cwd: &Path,
+) -> Option<&'a WorkspaceSidebarProject> {
+    projects
+        .iter()
+        .filter_map(|project| {
+            let root = Path::new(project.root_path.as_str());
+            cwd.starts_with(root)
+                .then_some((root.components().count(), project))
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, project)| project)
+}
+
+fn pick_session_for_inferred_binding<'a>(
+    project: &'a WorkspaceSidebarProject,
+    bound_session_keys: &HashSet<String>,
+    tab_title: &str,
+) -> Option<&'a WorkspaceSidebarSession> {
+    let unbound: Vec<&WorkspaceSidebarSession> = project
+        .sessions
+        .iter()
+        .filter(|session| {
+            let key = sidebar_session_key(project.id.as_str(), session.id.as_str());
+            !bound_session_keys.contains(&key)
+        })
+        .collect();
+
+    let candidates: Vec<&WorkspaceSidebarSession> = if unbound.is_empty() {
+        project.sessions.iter().collect()
+    } else {
+        unbound
+    };
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let normalized_title = tab_title.trim();
+    if !normalized_title.is_empty() {
+        if let Some(session) = candidates
+            .iter()
+            .find(|session| session.title.as_str() == normalized_title)
+        {
+            return Some(*session);
+        }
+    }
+
+    if candidates.len() == 1 {
+        return Some(candidates[0]);
+    }
+
+    let now = Utc::now();
+    if let Some(active_like) = candidates.iter().find(|session| {
+        matches!(
+            SessionStatus::parse_storage(session.status.as_str()),
+            Some(SessionStatus::Loading | SessionStatus::NeedApprove | SessionStatus::Running)
+        ) && !is_stale_transient_session_status(
+            session.status.as_str(),
+            session.updated_at.as_str(),
+            now,
+        )
+    }) {
+        return Some(*active_like);
+    }
+
+    let non_stale_candidates: Vec<&WorkspaceSidebarSession> = candidates
+        .iter()
+        .copied()
+        .filter(|session| {
+            !is_stale_transient_session_status(
+                session.status.as_str(),
+                session.updated_at.as_str(),
+                now,
+            )
+        })
+        .collect();
+
+    let ranked = if non_stale_candidates.is_empty() {
+        candidates
+    } else {
+        non_stale_candidates
+    };
+
+    ranked
+        .into_iter()
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+}
+
+fn normalize_transient_session_status(
+    status: &str,
+    updated_at: &str,
+    now: DateTime<Utc>,
+) -> String {
+    if is_stale_transient_session_status(status, updated_at, now) {
+        return SessionStatus::Idle.as_storage_str().to_string();
+    }
+
+    SessionStatus::parse_storage(status)
+        .map(SessionStatus::as_storage_str)
+        .unwrap_or(SessionStatus::Idle.as_storage_str())
+        .to_string()
+}
+
+fn is_stale_transient_session_status(status: &str, updated_at: &str, now: DateTime<Utc>) -> bool {
+    let Some(status) = SessionStatus::parse_storage(status) else {
+        return false;
+    };
+    if !matches!(
+        status,
+        SessionStatus::Loading | SessionStatus::NeedApprove | SessionStatus::Running
+    ) {
+        return false;
+    }
+
+    let stale_after = chrono::Duration::from_std(SIDEBAR_TRANSIENT_STATUS_STALE_AFTER)
+        .unwrap_or_else(|_| chrono::Duration::hours(6));
+    let parsed = match DateTime::parse_from_rfc3339(updated_at) {
+        Ok(value) => value.with_timezone(&Utc),
+        Err(_) => return true,
+    };
+    now.signed_duration_since(parsed) >= stale_after
+}
+
 fn pluralize_session(count: usize) -> &'static str {
     if count == 1 {
         "session"
@@ -2315,9 +2651,7 @@ fn normalize_root_path(path: &Path) -> anyhow::Result<String> {
         bail!("root path is not a directory: {}", absolute.display());
     }
 
-    let normalized = absolute
-        .canonicalize()
-        .unwrap_or_else(|_| absolute.clone());
+    let normalized = absolute.canonicalize().unwrap_or_else(|_| absolute.clone());
 
     Ok(normalized.to_string_lossy().into_owned())
 }
@@ -2437,13 +2771,19 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        is_stale_transient_session_status, normalize_transient_session_status,
+        pick_project_for_cwd, pick_session_for_inferred_binding,
+        sidebar_action_needs_pointer_position, sidebar_next_session_title, SessionEntry,
+        SidebarAction, SidebarLineTone, SidebarSessionStatus, WorkspaceSidebarProject,
+        WorkspaceSidebarSession,
+    };
     use crate::agent_status::events::{
         SessionStatus, SessionStatusConfidence, SessionStatusSource,
     };
-    use super::{
-        sidebar_action_needs_pointer_position, sidebar_next_session_title, SessionEntry,
-        SidebarAction, SidebarLineTone, SidebarSessionStatus,
-    };
+    use chrono::Utc;
+    use std::collections::HashSet;
+    use std::path::Path;
 
     #[test]
     fn parses_session_status_aliases() {
@@ -2533,6 +2873,159 @@ mod tests {
         ));
         assert!(!sidebar_action_needs_pointer_position(
             &SidebarAction::CreateProject
+        ));
+    }
+
+    #[test]
+    fn picks_longest_matching_project_root_for_cwd() {
+        let projects = vec![
+            WorkspaceSidebarProject {
+                id: "p1".to_string(),
+                name: "p1".to_string(),
+                root_path: "/Users/mlhiter/personal-projects".to_string(),
+                sessions: Vec::new(),
+            },
+            WorkspaceSidebarProject {
+                id: "p2".to_string(),
+                name: "p2".to_string(),
+                root_path: "/Users/mlhiter/personal-projects/Kaku".to_string(),
+                sessions: Vec::new(),
+            },
+        ];
+
+        let picked = pick_project_for_cwd(
+            &projects,
+            Path::new("/Users/mlhiter/personal-projects/Kaku/kaku-gui/src"),
+        )
+        .expect("must pick project");
+        assert_eq!(picked.id, "p2");
+    }
+
+    #[test]
+    fn picks_session_by_tab_title_from_unbound_candidates() {
+        let project = WorkspaceSidebarProject {
+            id: "proj".to_string(),
+            name: "proj".to_string(),
+            root_path: "/tmp/proj".to_string(),
+            sessions: vec![
+                WorkspaceSidebarSession {
+                    id: "sess-1".to_string(),
+                    title: "session-1".to_string(),
+                    status: SessionStatus::Idle.as_storage_str().to_string(),
+                    status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                    status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                    status_reason: String::new(),
+                    pinned: false,
+                    updated_at: "2026-04-03T10:00:00Z".to_string(),
+                },
+                WorkspaceSidebarSession {
+                    id: "sess-2".to_string(),
+                    title: "session-2".to_string(),
+                    status: SessionStatus::Idle.as_storage_str().to_string(),
+                    status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                    status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                    status_reason: String::new(),
+                    pinned: false,
+                    updated_at: "2026-04-03T10:01:00Z".to_string(),
+                },
+            ],
+        };
+
+        let mut bound = HashSet::new();
+        bound.insert("proj::sess-1".to_string());
+        let picked = pick_session_for_inferred_binding(&project, &bound, "session-2")
+            .expect("must pick session");
+        assert_eq!(picked.id, "sess-2");
+    }
+
+    #[test]
+    fn falls_back_to_most_recent_when_title_not_matched() {
+        let project = WorkspaceSidebarProject {
+            id: "proj".to_string(),
+            name: "proj".to_string(),
+            root_path: "/tmp/proj".to_string(),
+            sessions: vec![
+                WorkspaceSidebarSession {
+                    id: "sess-old".to_string(),
+                    title: "old".to_string(),
+                    status: SessionStatus::Idle.as_storage_str().to_string(),
+                    status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                    status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                    status_reason: String::new(),
+                    pinned: false,
+                    updated_at: "2026-04-03T10:00:00Z".to_string(),
+                },
+                WorkspaceSidebarSession {
+                    id: "sess-new".to_string(),
+                    title: "new".to_string(),
+                    status: SessionStatus::Idle.as_storage_str().to_string(),
+                    status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                    status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                    status_reason: String::new(),
+                    pinned: false,
+                    updated_at: "2026-04-03T10:02:00Z".to_string(),
+                },
+            ],
+        };
+
+        let picked = pick_session_for_inferred_binding(&project, &HashSet::new(), "unknown")
+            .expect("must pick session");
+        assert_eq!(picked.id, "sess-new");
+    }
+
+    #[test]
+    fn skips_stale_transient_session_when_inferring_binding() {
+        let project = WorkspaceSidebarProject {
+            id: "proj".to_string(),
+            name: "proj".to_string(),
+            root_path: "/tmp/proj".to_string(),
+            sessions: vec![
+                WorkspaceSidebarSession {
+                    id: "sess-stale-running".to_string(),
+                    title: "old-running".to_string(),
+                    status: SessionStatus::Running.as_storage_str().to_string(),
+                    status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                    status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                    status_reason: String::new(),
+                    pinned: false,
+                    updated_at: "2025-01-01T00:00:00Z".to_string(),
+                },
+                WorkspaceSidebarSession {
+                    id: "sess-idle".to_string(),
+                    title: "idle".to_string(),
+                    status: SessionStatus::Idle.as_storage_str().to_string(),
+                    status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                    status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                    status_reason: String::new(),
+                    pinned: false,
+                    updated_at: "2026-04-03T10:02:00Z".to_string(),
+                },
+            ],
+        };
+
+        let picked = pick_session_for_inferred_binding(&project, &HashSet::new(), "unknown")
+            .expect("must pick session");
+        assert_eq!(picked.id, "sess-idle");
+    }
+
+    #[test]
+    fn normalizes_stale_transient_status_to_idle() {
+        let normalized = normalize_transient_session_status(
+            SessionStatus::NeedApprove.as_storage_str(),
+            "2024-01-01T00:00:00Z",
+            Utc::now(),
+        );
+        assert_eq!(normalized, SessionStatus::Idle.as_storage_str());
+    }
+
+    #[test]
+    fn preserves_recent_transient_status() {
+        let now = Utc::now();
+        let updated_recent = (now - chrono::Duration::minutes(5)).to_rfc3339();
+        assert!(!is_stale_transient_session_status(
+            SessionStatus::Running.as_storage_str(),
+            updated_recent.as_str(),
+            now,
         ));
     }
 }

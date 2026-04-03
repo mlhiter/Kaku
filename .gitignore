@@ -99,3 +99,4 @@ kaku-ios/**/*.xcuserstate
 kaku-ios/**/xcschememanagement.plist
 
 .local-rustup
+skills-lock.json

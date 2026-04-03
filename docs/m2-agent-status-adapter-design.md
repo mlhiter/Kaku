@@ -197,7 +197,14 @@ enum AgentEvent {
    - user-var 信号可驱动 sidebar session 状态更新并持久化。
 3. 当前 Codex 接入形态：
    - 基于 shell user-var 的 heuristic 识别（`kaku_last_cmd` / `kaku_last_exit_code`）。
-   - 结构化事件源（App Server / JSON stream）尚未接入。
-4. 未完成项（后续）：
-   - M2-2 进一步完善 UI 消费细节与更新节流策略。
+   - App Server 结构化通知解析已接入 `CodexAdapter`（`turn/started`、`thread/status/changed`、`item/autoApprovalReview/*`、`turn/completed`、`error`）。
+   - 结构化通知在“App Server JSON 行可见”场景下为主信号，文本 prompt 匹配作为兜底。
+4. M2-2 当前已完成（部分）：
+   - 状态落盘已加入 debounce（300ms）以降低高频刷盘。
+   - 增加 pane output 采样入口，可做运行中上下文识别。
+5. 关键限制（已确认）：
+   - 外部独立 `codex` / `codex exec` 进程目前无法通过单独 App Server 实时订阅状态（`thread/list` 仅给到历史快照，`thread/resume` 对运行中外部会话不稳定显示实时 active）。
+   - 因此当前生产链路仍需保留 heuristic 路径保障可用性。
+6. 未完成项（后续）：
+   - 推进可观测的结构化主链路（例如受控入口运行 codex，或 shell 集成补充可绑定 thread 运行态信号）。
    - M2-3 重启恢复语义闭环与“不自动续跑”验证。

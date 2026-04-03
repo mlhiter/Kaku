@@ -88,12 +88,12 @@ use wezterm_gui_subcommands::{name_equals_value, StartCommand};
 use wezterm_mux_server_impl::update_mux_domains;
 use wezterm_toast_notification::*;
 
+mod agent_status;
 mod colorease;
 mod commands;
 mod customglyph;
 mod download;
 mod frontend;
-mod agent_status;
 mod glyphcache;
 mod inputmap;
 mod overlay;

@@ -6,6 +6,13 @@ use std::collections::HashMap;
 pub mod claude;
 pub mod codex;
 
+#[derive(Debug, Clone, Default)]
+pub struct AgentPaneOutputSample {
+    pub tail_text: String,
+    pub current_command: Option<String>,
+    pub foreground_process_name: Option<String>,
+}
+
 pub trait AgentAdapter {
     fn provider(&self) -> &'static str;
 
@@ -16,6 +23,14 @@ pub trait AgentAdapter {
         value: &str,
         user_vars: &HashMap<String, String>,
     ) -> Vec<AgentEvent>;
+
+    fn observe_pane_output(
+        &mut self,
+        _pane_key: &str,
+        _sample: &AgentPaneOutputSample,
+    ) -> Vec<AgentEvent> {
+        Vec::new()
+    }
 }
 
 #[derive(Default)]
@@ -45,6 +60,19 @@ impl AgentAdapterRegistry {
         let mut events = Vec::new();
         for adapter in &mut self.adapters {
             let mut adapter_events = adapter.observe_user_var(pane_key, name, value, user_vars);
+            events.append(&mut adapter_events);
+        }
+        events
+    }
+
+    pub fn observe_pane_output(
+        &mut self,
+        pane_key: &str,
+        sample: &AgentPaneOutputSample,
+    ) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        for adapter in &mut self.adapters {
+            let mut adapter_events = adapter.observe_pane_output(pane_key, sample);
             events.append(&mut adapter_events);
         }
         events
