@@ -138,6 +138,7 @@ struct SidebarLine {
     text: String,
     is_header: bool,
     tone: SidebarLineTone,
+    background: Option<SidebarLineBackground>,
     action: Option<SidebarAction>,
     trailing_buttons: Vec<SidebarTrailingButton>,
 }
@@ -154,6 +155,7 @@ impl SidebarLine {
             text: text.into(),
             is_header,
             tone: SidebarLineTone::Default,
+            background: None,
             action: None,
             trailing_buttons: Vec::new(),
         }
@@ -164,6 +166,7 @@ impl SidebarLine {
             text: text.into(),
             is_header: false,
             tone: SidebarLineTone::Default,
+            background: None,
             action: Some(action),
             trailing_buttons: Vec::new(),
         }
@@ -171,6 +174,11 @@ impl SidebarLine {
 
     fn with_tone(mut self, tone: SidebarLineTone) -> Self {
         self.tone = tone;
+        self
+    }
+
+    fn with_background(mut self, background: SidebarLineBackground) -> Self {
+        self.background = Some(background);
         self
     }
 
@@ -189,6 +197,11 @@ enum SidebarLineTone {
     Warning,
     Success,
     Danger,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SidebarLineBackground {
+    CurrentSession,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -217,13 +230,13 @@ impl SidebarSessionStatus {
 
     fn badge(self) -> &'static str {
         match self {
-            Self::Idle => "I",
-            Self::Loading => "L",
-            Self::NeedApprove => "?",
-            Self::Running => "R",
-            Self::Done => "D",
-            Self::Error => "E",
-            Self::Unknown => "U",
+            Self::Idle => "IDLE",
+            Self::Loading => "PREP",
+            Self::NeedApprove => "APPROVAL",
+            Self::Running => "LOADING",
+            Self::Done => "DONE",
+            Self::Error => "ERROR",
+            Self::Unknown => "UNKNOWN",
         }
     }
 
@@ -822,6 +835,16 @@ impl crate::TermWindow {
             let row_y = top.max(0.0);
             let row_height = line_height.max(1.0).ceil();
 
+            if let Some(background) = entry.background {
+                self.filled_rectangle(
+                    layers,
+                    1,
+                    euclid::rect(x + 6.0, row_y, (width - 12.0).max(0.0), row_height),
+                    sidebar_row_background_color(panel_bg, text_color, background),
+                )
+                .context("paint sidebar row background")?;
+            }
+
             if entry.is_header && !entry.text.trim().is_empty() {
                 self.filled_rectangle(
                     layers,
@@ -1203,9 +1226,19 @@ impl crate::TermWindow {
         (usable_px / cell_width).max(16)
     }
 
-    fn build_workspace_sidebar_lines(&self) -> Vec<SidebarLine> {
+    fn sidebar_current_session_binding_for_render(&mut self) -> Option<(String, String)> {
+        if let Some(binding) = self.sidebar_active_project_and_session() {
+            return Some(binding);
+        }
+
+        let pane_id = self.get_active_pane_or_overlay()?.pane_id();
+        self.sidebar_session_binding_for_pane(pane_id)
+    }
+
+    fn build_workspace_sidebar_lines(&mut self) -> Vec<SidebarLine> {
         let line_char_budget = self.sidebar_line_char_budget();
         let session_title_budget = line_char_budget.saturating_sub(20).max(16);
+        let active_session = self.sidebar_current_session_binding_for_render();
         let mut lines = vec![
             SidebarLine::new("WORKSPACE", true).with_tone(SidebarLineTone::Info),
             SidebarLine::new("", false),
@@ -1252,30 +1285,53 @@ impl crate::TermWindow {
             }
 
             for session in project.sessions.iter().take(8) {
+                let is_current = active_session
+                    .as_ref()
+                    .is_some_and(|(project_id, session_id)| {
+                        project_id == &project.id && session_id == &session.id
+                    });
                 let pin = if session.pinned { "📌" } else { "·" };
                 let status = SidebarSessionStatus::parse(session.status.as_str());
                 let status_chip = format!("[{pin}|{}]", status.badge());
-                lines.push(
-                    SidebarLine::action(
-                        format!(
-                            "  {} {}",
-                            status_chip,
-                            truncate_middle(session.title.as_str(), session_title_budget)
-                        ),
-                        SidebarAction::ActivateSession {
-                            project_id: project.id.clone(),
-                            session_id: session.id.clone(),
-                        },
-                    )
-                    .with_tone(status.tone())
-                    .with_trailing_button(
-                        "⋯",
-                        SidebarAction::OpenSessionContextMenu {
-                            project_id: project.id.clone(),
-                            session_id: session.id.clone(),
-                        },
+                let mut line = SidebarLine::action(
+                    format!(
+                        "  {} {}",
+                        status_chip,
+                        truncate_middle(session.title.as_str(), session_title_budget)
                     ),
+                    SidebarAction::ActivateSession {
+                        project_id: project.id.clone(),
+                        session_id: session.id.clone(),
+                    },
+                )
+                .with_tone(status.tone())
+                .with_trailing_button(
+                    "⋯",
+                    SidebarAction::OpenSessionContextMenu {
+                        project_id: project.id.clone(),
+                        session_id: session.id.clone(),
+                    },
                 );
+                if is_current {
+                    line = line.with_background(SidebarLineBackground::CurrentSession);
+                }
+                lines.push(line);
+
+                if matches!(status, SidebarSessionStatus::NeedApprove) {
+                    let detail = session.status_reason.trim();
+                    let detail_text = if detail.is_empty() {
+                        "      approval needed: review and choose allow/deny".to_string()
+                    } else {
+                        let detail_budget = line_char_budget.saturating_sub(24).max(20);
+                        format!(
+                            "      approval needed: {}",
+                            truncate_middle(detail, detail_budget)
+                        )
+                    };
+                    lines.push(
+                        SidebarLine::new(detail_text, false).with_tone(SidebarLineTone::Warning),
+                    );
+                }
             }
 
             lines.push(SidebarLine::new("", false));
@@ -2748,6 +2804,20 @@ fn sidebar_more_button_foreground(foreground: LinearRgba) -> LinearRgba {
     foreground.mul_alpha(0.92)
 }
 
+fn sidebar_row_background_color(
+    background: LinearRgba,
+    foreground: LinearRgba,
+    row_background: SidebarLineBackground,
+) -> LinearRgba {
+    match row_background {
+        SidebarLineBackground::CurrentSession => {
+            // Keep this between panel background and header strip intensity:
+            // distinct from default row, but not as strong as section headers.
+            mix_linear(background, foreground.mul_alpha(0.22), 0.18).mul_alpha(0.97)
+        }
+    }
+}
+
 fn sidebar_line_color(base: LinearRgba, tone: SidebarLineTone) -> LinearRgba {
     match tone {
         SidebarLineTone::Default => base,
@@ -2812,17 +2882,29 @@ mod tests {
     #[test]
     fn maps_status_to_badge_and_tone() {
         let cases = [
-            (SidebarSessionStatus::Idle, "I", SidebarLineTone::Muted),
-            (SidebarSessionStatus::Loading, "L", SidebarLineTone::Info),
+            (SidebarSessionStatus::Idle, "IDLE", SidebarLineTone::Muted),
+            (SidebarSessionStatus::Loading, "PREP", SidebarLineTone::Info),
             (
                 SidebarSessionStatus::NeedApprove,
-                "?",
+                "APPROVAL",
                 SidebarLineTone::Warning,
             ),
-            (SidebarSessionStatus::Running, "R", SidebarLineTone::Info),
-            (SidebarSessionStatus::Done, "D", SidebarLineTone::Success),
-            (SidebarSessionStatus::Error, "E", SidebarLineTone::Danger),
-            (SidebarSessionStatus::Unknown, "U", SidebarLineTone::Muted),
+            (
+                SidebarSessionStatus::Running,
+                "LOADING",
+                SidebarLineTone::Info,
+            ),
+            (SidebarSessionStatus::Done, "DONE", SidebarLineTone::Success),
+            (
+                SidebarSessionStatus::Error,
+                "ERROR",
+                SidebarLineTone::Danger,
+            ),
+            (
+                SidebarSessionStatus::Unknown,
+                "UNKNOWN",
+                SidebarLineTone::Muted,
+            ),
         ];
 
         for (status, expected_badge, expected_tone) in cases {

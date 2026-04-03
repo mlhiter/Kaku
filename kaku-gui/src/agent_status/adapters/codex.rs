@@ -58,12 +58,14 @@ impl AgentAdapter for CodexAdapter {
     ) -> Vec<AgentEvent> {
         let state = self.state_mut(pane_key);
         if let Some(events) = Self::observe_app_server_notification(state, sample) {
-            return events;
+            if !events.is_empty() {
+                return events;
+            }
         }
         if state.app_server_signal_seen {
-            // App-server messages are authoritative. Avoid mixing text fallback once
-            // structured transport has been observed for this pane.
-            return Vec::new();
+            // Keep approval fallback available even after structured transport is seen.
+            // Some app-server versions surface approval only in rendered terminal text.
+            return Self::observe_app_server_approval_fallback(state, sample);
         }
         Self::observe_approval_prompt(state, sample)
     }
@@ -115,7 +117,7 @@ impl CodexAdapter {
         match notification.method.as_str() {
             "turn/started" => {
                 state.app_server_turn_active = true;
-                Some(vec![task_started_event(), task_output_event()])
+                Some(vec![task_started_event()])
             }
             "item/started" | "item/completed" => Some(vec![task_output_event()]),
             "thread/status/changed" => Self::map_thread_status_changed(state, &notification.params),
@@ -277,14 +279,23 @@ impl CodexAdapter {
                 extract_string_field(&notification.params, &["reason", "grantRoot"])
                     .or_else(|| Some("applyPatchApproval".to_string()))
             }
-            _ => return None,
+            _ => {
+                let lower = notification.method.to_ascii_lowercase();
+                if !lower.contains("approval") {
+                    return None;
+                }
+                extract_string_field(
+                    &notification.params,
+                    &["reason", "command", "message", "title", "grantRoot"],
+                )
+                .or_else(|| Some(notification.method.clone()))
+            }
         };
 
         let mut events = Vec::new();
         if !state.app_server_turn_active {
             state.app_server_turn_active = true;
             events.push(task_started_event());
-            events.push(task_output_event());
         }
         events.extend(mark_approval_required(state, detail));
         Some(events)
@@ -337,7 +348,6 @@ impl CodexAdapter {
             state.fallback_active = true;
             state.fallback_hard_context = codex_context;
             events.push(task_started_event());
-            events.push(task_output_event());
         } else if codex_context {
             state.fallback_hard_context = true;
         }
@@ -355,6 +365,19 @@ impl CodexAdapter {
             }
         }
         events
+    }
+
+    fn observe_app_server_approval_fallback(
+        state: &mut PaneRuntimeState,
+        sample: &AgentPaneOutputSample,
+    ) -> Vec<AgentEvent> {
+        let approval_detail = extract_approval_prompt(sample.tail_text.as_str());
+        match approval_detail {
+            Some(detail) => mark_approval_required(state, Some(detail)),
+            None => mark_approval_resolved_if_visible(state, true)
+                .into_iter()
+                .collect(),
+        }
     }
 
     fn observe_last_cmd(state: &mut PaneRuntimeState, command: &str) -> Vec<AgentEvent> {
@@ -377,7 +400,7 @@ impl CodexAdapter {
 
         state.fallback_active = true;
         state.fallback_hard_context = true;
-        vec![task_started_event(), task_output_event()]
+        vec![task_started_event()]
     }
 
     fn observe_wezterm_prog(
@@ -501,14 +524,36 @@ fn mark_approval_resolved_if_visible(
 }
 
 fn is_waiting_on_approval_status(status: Option<&Value>) -> bool {
-    status
-        .and_then(|value| value.get("activeFlags"))
+    let Some(status) = status else {
+        return false;
+    };
+
+    let status_type = status
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if status_type.contains("approval") {
+        return true;
+    }
+
+    if status
+        .get("activeFlags")
         .and_then(Value::as_array)
         .is_some_and(|flags| {
-            flags
-                .iter()
-                .any(|flag| flag.as_str() == Some("waitingOnApproval"))
+            flags.iter().filter_map(Value::as_str).any(|flag| {
+                flag.eq_ignore_ascii_case("waitingOnApproval")
+                    || flag.to_ascii_lowercase().contains("approval")
+            })
         })
+    {
+        return true;
+    }
+
+    status
+        .get("waitReason")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.to_ascii_lowercase().contains("approval"))
 }
 
 fn task_started_event() -> AgentEvent {
@@ -794,14 +839,9 @@ mod tests {
             adapter.observe_user_var("1", "kaku_last_cmd", "codex --help", &HashMap::new());
         assert_eq!(
             started,
-            vec![
-                AgentEvent::TaskStarted {
-                    provider: "codex".to_string()
-                },
-                AgentEvent::TaskOutput {
-                    provider: "codex".to_string()
-                }
-            ]
+            vec![AgentEvent::TaskStarted {
+                provider: "codex".to_string()
+            }]
         );
 
         let mut vars = HashMap::new();
@@ -822,14 +862,9 @@ mod tests {
             adapter.observe_user_var("1", "WEZTERM_PROG", "codex --help", &HashMap::new());
         assert_eq!(
             started,
-            vec![
-                AgentEvent::TaskStarted {
-                    provider: "codex".to_string()
-                },
-                AgentEvent::TaskOutput {
-                    provider: "codex".to_string()
-                }
-            ]
+            vec![AgentEvent::TaskStarted {
+                provider: "codex".to_string()
+            }]
         );
 
         let completed = adapter.observe_user_var("1", "kaku_last_exit_code", "0", &HashMap::new());
@@ -991,14 +1026,9 @@ mod tests {
         );
         assert_eq!(
             started,
-            vec![
-                AgentEvent::TaskStarted {
-                    provider: "codex".to_string()
-                },
-                AgentEvent::TaskOutput {
-                    provider: "codex".to_string()
-                }
-            ]
+            vec![AgentEvent::TaskStarted {
+                provider: "codex".to_string()
+            }]
         );
 
         let completed = adapter.observe_pane_output(
@@ -1078,9 +1108,6 @@ mod tests {
                 AgentEvent::TaskStarted {
                     provider: "codex".to_string(),
                 },
-                AgentEvent::TaskOutput {
-                    provider: "codex".to_string(),
-                },
                 AgentEvent::ApprovalRequired {
                     provider: "codex".to_string(),
                     detail: Some("git push".to_string()),
@@ -1145,14 +1172,9 @@ Approve command execution? [y/N]"#;
         let running = adapter.observe_pane_output("1", &codex_sample("thinking..."));
         assert_eq!(
             running,
-            vec![
-                AgentEvent::TaskStarted {
-                    provider: "codex".to_string(),
-                },
-                AgentEvent::TaskOutput {
-                    provider: "codex".to_string(),
-                },
-            ]
+            vec![AgentEvent::TaskStarted {
+                provider: "codex".to_string(),
+            }]
         );
 
         let mut vars = HashMap::new();
@@ -1182,6 +1204,64 @@ Approve command execution? [y/N]"#;
     }
 
     #[test]
+    fn app_server_mode_still_emits_text_approval_events() {
+        let mut adapter = CodexAdapter::default();
+        let _ = adapter.observe_user_var("1", "kaku_last_cmd", "codex", &HashMap::new());
+        let _ = adapter.observe_pane_output(
+            "1",
+            &codex_sample(
+                r#"{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"x","status":"inProgress","items":[],"error":null}}}"#,
+            ),
+        );
+
+        let required = adapter.observe_pane_output(
+            "1",
+            &codex_sample("Press enter to confirm or esc to cancel"),
+        );
+        assert_eq!(
+            required,
+            vec![AgentEvent::ApprovalRequired {
+                provider: "codex".to_string(),
+                detail: Some("Press enter to confirm or esc to cancel".to_string()),
+            }]
+        );
+
+        let resolved = adapter.observe_pane_output("1", &codex_sample("still working..."));
+        assert_eq!(
+            resolved,
+            vec![AgentEvent::ApprovalResolved {
+                provider: "codex".to_string(),
+                approved: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn maps_generic_app_server_approval_method() {
+        let mut adapter = CodexAdapter::default();
+        let _ = adapter.observe_user_var("1", "kaku_last_cmd", "codex", &HashMap::new());
+
+        let events = adapter.observe_pane_output(
+            "1",
+            &codex_sample(
+                r#"{"id":"req1","method":"item/tool/requestApprovalV2","params":{"reason":"need user approval"}}"#,
+            ),
+        );
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::TaskStarted {
+                    provider: "codex".to_string(),
+                },
+                AgentEvent::ApprovalRequired {
+                    provider: "codex".to_string(),
+                    detail: Some("need user approval".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn explicit_non_codex_context_completes_hard_context_turn() {
         let mut adapter = CodexAdapter::default();
         let _ = adapter.observe_user_var("1", "kaku_last_cmd", "codex", &HashMap::new());
@@ -1208,9 +1288,6 @@ Approve command execution? [y/N]"#;
                 AgentEvent::TaskStarted {
                     provider: "codex".to_string(),
                 },
-                AgentEvent::TaskOutput {
-                    provider: "codex".to_string(),
-                },
                 AgentEvent::ApprovalRequired {
                     provider: "codex".to_string(),
                     detail: Some("Approve this action? [y/N]".to_string()),
@@ -1228,9 +1305,6 @@ Approve command execution? [y/N]"#;
             events,
             vec![
                 AgentEvent::TaskStarted {
-                    provider: "codex".to_string(),
-                },
-                AgentEvent::TaskOutput {
                     provider: "codex".to_string(),
                 },
                 AgentEvent::ApprovalRequired {
