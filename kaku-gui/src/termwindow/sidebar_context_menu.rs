@@ -2,7 +2,7 @@ use crate::termwindow::box_model::*;
 use crate::termwindow::modal::Modal;
 use crate::termwindow::{SidebarAction, TermWindow, UIItem};
 use crate::utilsprites::RenderMetrics;
-use anyhow::{ensure, Context};
+use anyhow::{Context, ensure};
 use config::{Dimension, DimensionContext};
 use std::cell::{Ref, RefCell};
 use termwiz::cell::unicode_column_width;
@@ -46,6 +46,52 @@ pub struct SidebarContextMenuModal {
     anchor: UIItem,
     items: Vec<SidebarContextMenuItem>,
     selected_row: RefCell<usize>,
+    pressed_row: RefCell<Option<usize>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContextMenuMouseAction {
+    None,
+    Hover(usize),
+    Arm(usize),
+    Activate(usize),
+    Cancel,
+    Scroll(isize),
+}
+
+fn context_menu_mouse_action(
+    kind: MouseEventKind,
+    button: MouseButton,
+    hit_row: Option<usize>,
+    had_pressed_row: bool,
+) -> ContextMenuMouseAction {
+    match (kind, button) {
+        (MouseEventKind::Move, MouseButton::None | MouseButton::Left) => {
+            hit_row.map_or(ContextMenuMouseAction::None, ContextMenuMouseAction::Hover)
+        }
+        (MouseEventKind::Press, MouseButton::Left) => {
+            hit_row.map_or(ContextMenuMouseAction::Cancel, ContextMenuMouseAction::Arm)
+        }
+        (MouseEventKind::Release, MouseButton::Left) => {
+            if had_pressed_row {
+                hit_row.map_or(
+                    ContextMenuMouseAction::Cancel,
+                    ContextMenuMouseAction::Activate,
+                )
+            } else {
+                ContextMenuMouseAction::None
+            }
+        }
+        (MouseEventKind::Press, MouseButton::Right) => ContextMenuMouseAction::Cancel,
+        (MouseEventKind::Press, MouseButton::WheelUp(lines)) => {
+            ContextMenuMouseAction::Scroll(-(lines.max(1).min(4) as isize))
+        }
+        (MouseEventKind::Press, MouseButton::WheelDown(lines)) => {
+            ContextMenuMouseAction::Scroll(lines.max(1).min(4) as isize)
+        }
+        (MouseEventKind::Press, _) => ContextMenuMouseAction::Cancel,
+        _ => ContextMenuMouseAction::None,
+    }
 }
 
 impl SidebarContextMenuModal {
@@ -63,6 +109,7 @@ impl SidebarContextMenuModal {
             anchor,
             items,
             selected_row: RefCell::new(0),
+            pressed_row: RefCell::new(None),
         };
         modal.reconfigure(term_window);
         Ok(modal)
@@ -202,15 +249,15 @@ impl SidebarContextMenuModal {
             rows.push(
                 Element::new(
                     &font,
-                    ElementContent::Children(vec![Element::new(
-                        &font,
-                        ElementContent::Text(item.label.clone()),
-                    )
-                    .colors(ElementColors {
-                        border: BorderColor::default(),
-                        bg: LinearRgba::TRANSPARENT.into(),
-                        text: Self::row_text_color(item, &palette).into(),
-                    })]),
+                    ElementContent::Children(vec![
+                        Element::new(&font, ElementContent::Text(item.label.clone())).colors(
+                            ElementColors {
+                                border: BorderColor::default(),
+                                bg: LinearRgba::TRANSPARENT.into(),
+                                text: Self::row_text_color(item, &palette).into(),
+                            },
+                        ),
+                    ]),
                 )
                 .colors(ElementColors {
                     border: BorderColor::default(),
@@ -272,40 +319,36 @@ impl SidebarContextMenuModal {
 impl Modal for SidebarContextMenuModal {
     fn mouse_event(&self, event: MouseEvent, term_window: &mut TermWindow) -> anyhow::Result<()> {
         let (abs_x, abs_y) = Self::map_event_point_to_abs(event, term_window);
+        let hit_row = self.row_from_abs_point(abs_x, abs_y);
+        let had_pressed_row = self.pressed_row.borrow().is_some();
 
-        match (event.kind, event.button) {
-            (MouseEventKind::Move, MouseButton::None | MouseButton::Left) => {
-                if let Some(row) = self.row_from_abs_point(abs_x, abs_y) {
-                    if self.set_selection(row) {
-                        term_window.invalidate_modal();
-                    }
-                }
-            }
-            (MouseEventKind::Press, MouseButton::Left) => {
-                if let Some(row) = self.row_from_abs_point(abs_x, abs_y) {
-                    let _ = self.set_selection(row);
-                    self.activate_selected(term_window);
-                } else {
-                    term_window.cancel_modal();
-                }
-            }
-            (MouseEventKind::Press, MouseButton::Right) => {
-                term_window.cancel_modal();
-            }
-            (MouseEventKind::Press, MouseButton::WheelUp(lines)) => {
-                if self.move_selection(-(lines.max(1).min(4) as isize)) {
+        match context_menu_mouse_action(event.kind, event.button, hit_row, had_pressed_row) {
+            ContextMenuMouseAction::None => {}
+            ContextMenuMouseAction::Hover(row) => {
+                if self.set_selection(row) {
                     term_window.invalidate_modal();
                 }
             }
-            (MouseEventKind::Press, MouseButton::WheelDown(lines)) => {
-                if self.move_selection(lines.max(1).min(4) as isize) {
+            ContextMenuMouseAction::Arm(row) => {
+                self.pressed_row.borrow_mut().replace(row);
+                if self.set_selection(row) {
                     term_window.invalidate_modal();
                 }
             }
-            (MouseEventKind::Press, _) => {
+            ContextMenuMouseAction::Activate(row) => {
+                self.pressed_row.borrow_mut().take();
+                let _ = self.set_selection(row);
+                self.activate_selected(term_window);
+            }
+            ContextMenuMouseAction::Cancel => {
+                self.pressed_row.borrow_mut().take();
                 term_window.cancel_modal();
             }
-            _ => {}
+            ContextMenuMouseAction::Scroll(delta) => {
+                if self.move_selection(delta) {
+                    term_window.invalidate_modal();
+                }
+            }
         }
 
         Ok(())
@@ -377,5 +420,39 @@ impl Modal for SidebarContextMenuModal {
 
     fn reconfigure(&self, _term_window: &mut TermWindow) {
         self.element.borrow_mut().take();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContextMenuMouseAction, context_menu_mouse_action};
+    use wezterm_term::{MouseButton, MouseEventKind};
+
+    #[test]
+    fn left_press_only_arms_row() {
+        let action =
+            context_menu_mouse_action(MouseEventKind::Press, MouseButton::Left, Some(2), false);
+        assert_eq!(action, ContextMenuMouseAction::Arm(2));
+    }
+
+    #[test]
+    fn left_release_without_armed_press_does_not_activate() {
+        let action =
+            context_menu_mouse_action(MouseEventKind::Release, MouseButton::Left, Some(1), false);
+        assert_eq!(action, ContextMenuMouseAction::None);
+    }
+
+    #[test]
+    fn left_release_after_armed_press_activates_hit_row() {
+        let action =
+            context_menu_mouse_action(MouseEventKind::Release, MouseButton::Left, Some(1), true);
+        assert_eq!(action, ContextMenuMouseAction::Activate(1));
+    }
+
+    #[test]
+    fn left_release_after_armed_press_outside_cancels() {
+        let action =
+            context_menu_mouse_action(MouseEventKind::Release, MouseButton::Left, None, true);
+        assert_eq!(action, ContextMenuMouseAction::Cancel);
     }
 }

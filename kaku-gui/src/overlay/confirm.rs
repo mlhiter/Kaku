@@ -3,7 +3,7 @@ use config::keyassignment::{Confirmation, KeyAssignment};
 use mux::termwiztermtab::TermWizTerminal;
 use mux_lua::MuxPane;
 use std::rc::Rc;
-use termwiz::cell::{unicode_column_width, AttributeChange, Intensity};
+use termwiz::cell::{AttributeChange, Intensity, unicode_column_width};
 use termwiz::color::ColorAttribute;
 use termwiz::input::{InputEvent, KeyCode, KeyEvent, MouseButtons, MouseEvent};
 use termwiz::surface::{Change, CursorVisibility, Position};
@@ -13,7 +13,7 @@ pub fn run_confirmation(message: &str, term: &mut TermWizTerminal) -> anyhow::Re
     run_confirmation_impl(message, term)
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ActiveButton {
     None,
     Yes,
@@ -23,6 +23,45 @@ enum ActiveButton {
 struct ButtonLayout {
     x: usize,
     width: usize,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ConfirmationMouseAction {
+    None(ActiveButton),
+    Confirm,
+    Cancel,
+}
+
+fn confirmation_mouse_action(
+    x: usize,
+    y: usize,
+    mouse_buttons: MouseButtons,
+    button_row: usize,
+    yes_button: &ButtonLayout,
+    no_button: &ButtonLayout,
+) -> ConfirmationMouseAction {
+    let active = if y == button_row && x >= yes_button.x && x < yes_button.x + yes_button.width {
+        ActiveButton::Yes
+    } else if y == button_row && x >= no_button.x && x < no_button.x + no_button.width {
+        ActiveButton::No
+    } else {
+        ActiveButton::None
+    };
+
+    if mouse_buttons != MouseButtons::NONE {
+        if mouse_buttons.contains(MouseButtons::LEFT) {
+            return match active {
+                ActiveButton::Yes => ConfirmationMouseAction::Confirm,
+                ActiveButton::No => ConfirmationMouseAction::Cancel,
+                // Ignore left clicks outside buttons so stale click/release
+                // events from prior UI interactions don't auto-cancel.
+                ActiveButton::None => ConfirmationMouseAction::None(active),
+            };
+        }
+        return ConfirmationMouseAction::Cancel;
+    }
+
+    ConfirmationMouseAction::None(active)
 }
 
 fn run_confirmation_impl(message: &str, term: &mut TermWizTerminal) -> anyhow::Result<bool> {
@@ -193,25 +232,25 @@ fn run_confirmation_impl(message: &str, term: &mut TermWizTerminal) -> anyhow::R
                 mouse_buttons,
                 ..
             }) => {
-                let x = x as usize;
-                let y = y as usize;
-                if y == button_row && x >= yes_button.x && x < yes_button.x + yes_button.width {
-                    active = ActiveButton::Yes;
-                    if mouse_buttons == MouseButtons::LEFT {
+                let mouse_action = confirmation_mouse_action(
+                    x as usize,
+                    y as usize,
+                    mouse_buttons,
+                    button_row,
+                    &yes_button,
+                    &no_button,
+                );
+
+                match mouse_action {
+                    ConfirmationMouseAction::None(next_active) => {
+                        active = next_active;
+                    }
+                    ConfirmationMouseAction::Confirm => {
                         return Ok(true);
                     }
-                } else if y == button_row && x >= no_button.x && x < no_button.x + no_button.width {
-                    active = ActiveButton::No;
-                    if mouse_buttons == MouseButtons::LEFT {
+                    ConfirmationMouseAction::Cancel => {
                         return Ok(false);
                     }
-                } else {
-                    active = ActiveButton::None;
-                }
-
-                if mouse_buttons != MouseButtons::NONE {
-                    // Treat any other mouse button as cancel
-                    return Ok(false);
                 }
             }
             _ => {}
@@ -259,6 +298,76 @@ fn trampoline(name: String, window: GuiWin, pane: MuxPane) {
         config::with_lua_config_on_main_thread(move |lua| do_event(lua, name, window, pane)).await
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActiveButton, ButtonLayout, ConfirmationMouseAction, confirmation_mouse_action};
+    use termwiz::input::MouseButtons;
+
+    fn sample_buttons() -> (usize, ButtonLayout, ButtonLayout) {
+        (
+            12,
+            ButtonLayout { x: 20, width: 11 },
+            ButtonLayout { x: 6, width: 10 },
+        )
+    }
+
+    #[test]
+    fn left_click_yes_confirms() {
+        let (button_row, yes_button, no_button) = sample_buttons();
+        let action = confirmation_mouse_action(
+            yes_button.x,
+            button_row,
+            MouseButtons::LEFT,
+            button_row,
+            &yes_button,
+            &no_button,
+        );
+        assert_eq!(action, ConfirmationMouseAction::Confirm);
+    }
+
+    #[test]
+    fn left_click_no_cancels() {
+        let (button_row, yes_button, no_button) = sample_buttons();
+        let action = confirmation_mouse_action(
+            no_button.x,
+            button_row,
+            MouseButtons::LEFT,
+            button_row,
+            &yes_button,
+            &no_button,
+        );
+        assert_eq!(action, ConfirmationMouseAction::Cancel);
+    }
+
+    #[test]
+    fn left_click_outside_ignores() {
+        let (button_row, yes_button, no_button) = sample_buttons();
+        let action = confirmation_mouse_action(
+            0,
+            0,
+            MouseButtons::LEFT,
+            button_row,
+            &yes_button,
+            &no_button,
+        );
+        assert_eq!(action, ConfirmationMouseAction::None(ActiveButton::None));
+    }
+
+    #[test]
+    fn right_click_cancels() {
+        let (button_row, yes_button, no_button) = sample_buttons();
+        let action = confirmation_mouse_action(
+            0,
+            0,
+            MouseButtons::RIGHT,
+            button_row,
+            &yes_button,
+            &no_button,
+        );
+        assert_eq!(action, ConfirmationMouseAction::Cancel);
+    }
 }
 
 async fn do_event(
