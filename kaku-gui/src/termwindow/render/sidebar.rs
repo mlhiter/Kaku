@@ -252,6 +252,33 @@ impl SidebarSessionStatus {
     }
 }
 
+fn parse_session_status_source(value: &str) -> SessionStatusSource {
+    SessionStatusSource::parse_storage(value).unwrap_or(SessionStatusSource::Heuristic)
+}
+
+fn parse_session_status_confidence(value: &str) -> SessionStatusConfidence {
+    SessionStatusConfidence::parse_storage(value).unwrap_or(SessionStatusConfidence::Low)
+}
+
+fn sidebar_status_signal_tag(
+    source: SessionStatusSource,
+    confidence: SessionStatusConfidence,
+) -> &'static str {
+    match (source, confidence) {
+        (SessionStatusSource::Structured, SessionStatusConfidence::High) => "S+",
+        (SessionStatusSource::Structured, SessionStatusConfidence::Low) => "S?",
+        (SessionStatusSource::Heuristic, SessionStatusConfidence::High) => "H+",
+        (SessionStatusSource::Heuristic, SessionStatusConfidence::Low) => "H?",
+    }
+}
+
+fn sidebar_status_source_label(source: SessionStatusSource) -> &'static str {
+    match source {
+        SessionStatusSource::Structured => "structured",
+        SessionStatusSource::Heuristic => "heuristic",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SidebarSessionMeta {
     title: String,
@@ -649,10 +676,8 @@ impl crate::TermWindow {
 
         let status =
             SessionStatus::parse_storage(session.status.as_str()).unwrap_or(SessionStatus::Idle);
-        let source = SessionStatusSource::parse_storage(session.status_source.as_str())
-            .unwrap_or(SessionStatusSource::Heuristic);
-        let confidence = SessionStatusConfidence::parse_storage(session.status_confidence.as_str())
-            .unwrap_or(SessionStatusConfidence::Low);
+        let source = parse_session_status_source(session.status_source.as_str());
+        let confidence = parse_session_status_confidence(session.status_confidence.as_str());
         let reason = if session.status_reason.trim().is_empty() {
             None
         } else {
@@ -1237,7 +1262,6 @@ impl crate::TermWindow {
 
     fn build_workspace_sidebar_lines(&mut self) -> Vec<SidebarLine> {
         let line_char_budget = self.sidebar_line_char_budget();
-        let session_title_budget = line_char_budget.saturating_sub(20).max(16);
         let active_session = self.sidebar_current_session_binding_for_render();
         let mut lines = vec![
             SidebarLine::new("WORKSPACE", true).with_tone(SidebarLineTone::Info),
@@ -1292,7 +1316,16 @@ impl crate::TermWindow {
                     });
                 let pin = if session.pinned { "📌" } else { "·" };
                 let status = SidebarSessionStatus::parse(session.status.as_str());
-                let status_chip = format!("[{pin}|{}]", status.badge());
+                let source = parse_session_status_source(session.status_source.as_str());
+                let confidence = parse_session_status_confidence(session.status_confidence.as_str());
+                let status_chip = format!(
+                    "[{pin}|{}|{}]",
+                    status.badge(),
+                    sidebar_status_signal_tag(source, confidence)
+                );
+                let session_title_budget = line_char_budget
+                    .saturating_sub(status_chip.chars().count().saturating_add(4))
+                    .max(12);
                 let mut line = SidebarLine::action(
                     format!(
                         "  {} {}",
@@ -1319,17 +1352,37 @@ impl crate::TermWindow {
 
                 if matches!(status, SidebarSessionStatus::NeedApprove) {
                     let detail = session.status_reason.trim();
-                    let detail_text = if detail.is_empty() {
-                        "      approval needed: review and choose allow/deny".to_string()
+                    let detail_head = if matches!(confidence, SessionStatusConfidence::Low) {
+                        "approval maybe required [low confidence]"
                     } else {
-                        let detail_budget = line_char_budget.saturating_sub(24).max(20);
+                        "approval required"
+                    };
+                    let detail_text = if detail.is_empty() {
+                        format!("      {detail_head}: review and choose allow/deny")
+                    } else {
+                        let detail_budget = line_char_budget.saturating_sub(30).max(20);
                         format!(
-                            "      approval needed: {}",
+                            "      {detail_head}: {}",
                             truncate_middle(detail, detail_budget)
                         )
                     };
                     lines.push(
                         SidebarLine::new(detail_text, false).with_tone(SidebarLineTone::Warning),
+                    );
+                } else if matches!(confidence, SessionStatusConfidence::Low)
+                    && matches!(
+                        status,
+                        SidebarSessionStatus::Loading
+                            | SidebarSessionStatus::Running
+                            | SidebarSessionStatus::Unknown
+                    )
+                {
+                    let signal_text = format!(
+                        "      signal: {} (low confidence)",
+                        sidebar_status_source_label(source)
+                    );
+                    lines.push(
+                        SidebarLine::new(signal_text, false).with_tone(SidebarLineTone::Muted),
                     );
                 }
             }
@@ -2843,6 +2896,7 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 mod tests {
     use super::{
         is_stale_transient_session_status, normalize_transient_session_status,
+        parse_session_status_confidence, parse_session_status_source, sidebar_status_signal_tag,
         pick_project_for_cwd, pick_session_for_inferred_binding,
         sidebar_action_needs_pointer_position, sidebar_next_session_title, SessionEntry,
         SidebarAction, SidebarLineTone, SidebarSessionStatus, WorkspaceSidebarProject,
@@ -2911,6 +2965,66 @@ mod tests {
             assert_eq!(status.badge(), expected_badge);
             assert_eq!(status.tone(), expected_tone);
         }
+    }
+
+    #[test]
+    fn parses_status_source_and_confidence_with_fallbacks() {
+        assert_eq!(
+            parse_session_status_source("structured"),
+            SessionStatusSource::Structured
+        );
+        assert_eq!(
+            parse_session_status_source("heuristic"),
+            SessionStatusSource::Heuristic
+        );
+        assert_eq!(
+            parse_session_status_source("unknown"),
+            SessionStatusSource::Heuristic
+        );
+        assert_eq!(
+            parse_session_status_confidence("high"),
+            SessionStatusConfidence::High
+        );
+        assert_eq!(
+            parse_session_status_confidence("low"),
+            SessionStatusConfidence::Low
+        );
+        assert_eq!(
+            parse_session_status_confidence("unknown"),
+            SessionStatusConfidence::Low
+        );
+    }
+
+    #[test]
+    fn maps_source_and_confidence_to_signal_tag() {
+        assert_eq!(
+            sidebar_status_signal_tag(
+                SessionStatusSource::Structured,
+                SessionStatusConfidence::High,
+            ),
+            "S+"
+        );
+        assert_eq!(
+            sidebar_status_signal_tag(
+                SessionStatusSource::Structured,
+                SessionStatusConfidence::Low,
+            ),
+            "S?"
+        );
+        assert_eq!(
+            sidebar_status_signal_tag(
+                SessionStatusSource::Heuristic,
+                SessionStatusConfidence::High,
+            ),
+            "H+"
+        );
+        assert_eq!(
+            sidebar_status_signal_tag(
+                SessionStatusSource::Heuristic,
+                SessionStatusConfidence::Low,
+            ),
+            "H?"
+        );
     }
 
     #[test]
