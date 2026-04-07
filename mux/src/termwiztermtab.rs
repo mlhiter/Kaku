@@ -37,6 +37,26 @@ use wezterm_term::{
     KeyCode, KeyModifiers, MouseEvent, StableRowIndex, TerminalConfiguration, TerminalSize,
 };
 
+fn map_termwiz_mouse_buttons(event: &MouseEvent) -> termwiz::input::MouseButtons {
+    use termwiz::input::MouseButtons as Buttons;
+    use wezterm_term::input::{MouseButton, MouseEventKind};
+
+    if matches!(event.kind, MouseEventKind::Release) {
+        return Buttons::NONE;
+    }
+
+    match event.button {
+        MouseButton::Left => Buttons::LEFT,
+        MouseButton::Middle => Buttons::MIDDLE,
+        MouseButton::Right => Buttons::RIGHT,
+        MouseButton::WheelUp(_) => Buttons::VERT_WHEEL | Buttons::WHEEL_POSITIVE,
+        MouseButton::WheelDown(_) => Buttons::VERT_WHEEL,
+        MouseButton::WheelLeft(_) => Buttons::HORZ_WHEEL | Buttons::WHEEL_POSITIVE,
+        MouseButton::WheelRight(_) => Buttons::HORZ_WHEEL,
+        MouseButton::None => Buttons::NONE,
+    }
+}
+
 struct TermWizTerminalDomain {
     domain_id: DomainId,
 }
@@ -238,19 +258,7 @@ impl Pane for TermWizTerminalPane {
     }
 
     fn mouse_event(&self, event: MouseEvent) -> anyhow::Result<()> {
-        use termwiz::input::MouseButtons as Buttons;
-        use wezterm_term::input::MouseButton;
-
-        let mouse_buttons = match event.button {
-            MouseButton::Left => Buttons::LEFT,
-            MouseButton::Middle => Buttons::MIDDLE,
-            MouseButton::Right => Buttons::RIGHT,
-            MouseButton::WheelUp(_) => Buttons::VERT_WHEEL | Buttons::WHEEL_POSITIVE,
-            MouseButton::WheelDown(_) => Buttons::VERT_WHEEL,
-            MouseButton::WheelLeft(_) => Buttons::HORZ_WHEEL | Buttons::WHEEL_POSITIVE,
-            MouseButton::WheelRight(_) => Buttons::HORZ_WHEEL,
-            MouseButton::None => Buttons::NONE,
-        };
+        let mouse_buttons = map_termwiz_mouse_buttons(&event);
 
         let event = InputEvent::Mouse(TermWizMouseEvent {
             x: event.x as u16,
@@ -314,6 +322,47 @@ impl Pane for TermWizTerminalPane {
                 self.terminal.lock().erase_scrollback_and_viewport();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_termwiz_mouse_buttons;
+    use termwiz::input::MouseButtons as Buttons;
+    use wezterm_term::input::{MouseButton, MouseEventKind};
+    use wezterm_term::{KeyModifiers, MouseEvent};
+
+    fn sample_mouse_event(kind: MouseEventKind, button: MouseButton) -> MouseEvent {
+        MouseEvent {
+            kind,
+            x: 10,
+            y: 4,
+            x_pixel_offset: 0,
+            y_pixel_offset: 0,
+            button,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn release_event_maps_to_none() {
+        let event = sample_mouse_event(MouseEventKind::Release, MouseButton::Left);
+        assert_eq!(map_termwiz_mouse_buttons(&event), Buttons::NONE);
+    }
+
+    #[test]
+    fn press_left_maps_to_left() {
+        let event = sample_mouse_event(MouseEventKind::Press, MouseButton::Left);
+        assert_eq!(map_termwiz_mouse_buttons(&event), Buttons::LEFT);
+    }
+
+    #[test]
+    fn wheel_up_maps_to_positive_vertical_wheel() {
+        let event = sample_mouse_event(MouseEventKind::Press, MouseButton::WheelUp(1));
+        assert_eq!(
+            map_termwiz_mouse_buttons(&event),
+            Buttons::VERT_WHEEL | Buttons::WHEEL_POSITIVE
+        );
     }
 }
 
