@@ -29,6 +29,7 @@ make install-hooks
 | `make check` | Compile check, catch type/syntax errors |
 | `make test` | Run unit tests |
 | `make dev` | Fast local debug: build `kaku-gui` and run from `target/debug` |
+| `make run-gui` | Always build then launch GUI (`start --always-new-process -- /bin/zsh -l`) |
 | `make build` | Compile binaries (no app bundle) |
 | `make app` | Build debug app bundle → `dist/Kaku.app` |
 
@@ -45,6 +46,16 @@ You can override log level for `make dev`:
 
 ```bash
 RUST_LOG=debug make dev
+```
+
+`make run-gui` supports overrides:
+
+```bash
+# Change startup flags
+GUI_START_FLAGS="--always-new-process" make run-gui
+
+# Change login shell
+GUI_SHELL=/bin/bash GUI_SHELL_ARGS="-l" make run-gui
 ```
 
 ## Build Release

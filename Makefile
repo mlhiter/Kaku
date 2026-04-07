@@ -1,8 +1,11 @@
-.PHONY: all fmt fmt-check build app dev check test install-tools install-hooks test-webgpu-fallback release dmg
+.PHONY: all fmt fmt-check build app dev run-gui check test install-tools install-hooks test-webgpu-fallback release dmg
 
 all: build
 
 RUST_LOG ?= info
+GUI_START_FLAGS ?= --always-new-process
+GUI_SHELL ?= /bin/zsh
+GUI_SHELL_ARGS ?= -l
 
 test:
 	cargo nextest run --locked -E 'not test(shapecache::test::ligatures_jetbrains)'
@@ -36,6 +39,9 @@ dev:
 		-i "dist/**" \
 		-i "deps/**" \
 		-x "run $(BUILD_OPTS) -p kaku-gui --"
+
+run-gui:
+	cargo run --locked $(BUILD_OPTS) -p kaku-gui -- start $(GUI_START_FLAGS) -- $(GUI_SHELL) $(GUI_SHELL_ARGS)
 
 build:
 	cargo build --locked $(BUILD_OPTS) -p kaku -p kaku-gui -p wezterm-mux-server-impl
