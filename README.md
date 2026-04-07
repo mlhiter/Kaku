@@ -33,6 +33,27 @@
 3. Open Kaku. The app is notarized by Apple, so it opens without security warnings
 4. On first launch, Kaku will automatically set up your shell environment
 
+## Local Development Run
+
+To avoid accidentally running a stale `target/debug/kaku-gui` binary, use:
+
+```bash
+make run-gui
+```
+
+This always rebuilds before launch and runs:
+
+```bash
+start --always-new-process -- /bin/zsh -l
+```
+
+You can override startup flags and shell:
+
+```bash
+GUI_START_FLAGS="--always-new-process" make run-gui
+GUI_SHELL=/bin/bash GUI_SHELL_ARGS="-l" make run-gui
+```
+
 ## Usage Guide
 
 | Action | Shortcut |
