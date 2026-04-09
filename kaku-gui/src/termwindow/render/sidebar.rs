@@ -20,7 +20,7 @@ use mux::pane::{CachePolicy, PaneId};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -28,7 +28,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::surface::Line;
-use wezterm_dynamic::Value as DynamicValue;
 use wezterm_term::color::ColorAttribute;
 use window::{WindowOps, color::LinearRgba};
 
@@ -1393,7 +1392,6 @@ impl crate::TermWindow {
             .unwrap_or(true);
 
         if !should_refresh {
-            self.sidebar_sync_background_from_settings();
             return;
         }
 
@@ -1407,7 +1405,6 @@ impl crate::TermWindow {
             }
         }
         self.workspace_sidebar.last_loaded_at = Some(now);
-        self.sidebar_sync_background_from_settings();
     }
 
     fn force_workspace_sidebar_refresh(&mut self) {
@@ -1927,44 +1924,6 @@ impl crate::TermWindow {
                     .with_tone(SidebarLineTone::Muted),
             );
         }
-        lines.push(SidebarLine::new("", false));
-
-        let background_file = self.sidebar_load_background_file().unwrap_or_default();
-        let image_display = if background_file.background.image_path.trim().is_empty() {
-            "(none)".to_string()
-        } else {
-            truncate_middle(
-                background_file.background.image_path.as_str(),
-                line_char_budget.saturating_sub(18).max(16),
-            )
-        };
-        lines.push(SidebarLine::new("Settings", true).with_tone(SidebarLineTone::Info));
-        lines.push(
-            SidebarLine::action(
-                format!("  Background: {image_display}"),
-                SidebarAction::OpenBackgroundContextMenu,
-            )
-            .with_tone(SidebarLineTone::Info)
-            .with_trailing_button("⋯", SidebarAction::OpenBackgroundContextMenu),
-        );
-        let fit_mode = normalize_background_fit_mode(background_file.background.fit_mode.as_str());
-        let readability_mode = if background_file.readability.mode == "auto" {
-            "auto"
-        } else {
-            "manual"
-        };
-        let fg_mode = normalize_readability_fg(background_file.readability.current_fg.as_str());
-        lines.push(
-            SidebarLine::new(
-                format!(
-                    "    fit:{fit_mode} overlay:{:.2} mode:{readability_mode} fg:{fg_mode} contrast:{:.2}",
-                    background_file.background.overlay_alpha,
-                    background_file.readability.last_contrast_ratio
-                ),
-                false,
-            )
-            .with_tone(SidebarLineTone::Muted),
-        );
         lines.push(SidebarLine::new("", false));
 
         if let Some(error) = &self.workspace_sidebar.last_load_error {
@@ -2628,128 +2587,6 @@ read -r _
         file.readability.last_luminance = luminance;
         file.readability.last_contrast_ratio = contrast;
         Ok(())
-    }
-
-    fn sidebar_build_background_override_values(
-        &self,
-        file: &ProjectBackgroundFile,
-    ) -> Option<BTreeMap<DynamicValue, DynamicValue>> {
-        let image_path = file.background.image_path.trim();
-        if image_path.is_empty() {
-            return None;
-        }
-
-        let fit_mode = normalize_background_fit_mode(file.background.fit_mode.as_str());
-        let size_value = match fit_mode {
-            "fit" => DynamicValue::String("Contain".to_string()),
-            "stretch" => DynamicValue::String("100%".to_string()),
-            _ => DynamicValue::String("Cover".to_string()),
-        };
-
-        let source_object: BTreeMap<DynamicValue, DynamicValue> = vec![(
-            DynamicValue::String("File".to_string()),
-            DynamicValue::String(image_path.to_string()),
-        )]
-        .into_iter()
-        .collect();
-
-        let layer_object: BTreeMap<DynamicValue, DynamicValue> = vec![
-            (
-                DynamicValue::String("source".to_string()),
-                DynamicValue::Object(source_object.into()),
-            ),
-            (
-                DynamicValue::String("repeat_x".to_string()),
-                DynamicValue::String("NoRepeat".to_string()),
-            ),
-            (
-                DynamicValue::String("repeat_y".to_string()),
-                DynamicValue::String("NoRepeat".to_string()),
-            ),
-            (DynamicValue::String("width".to_string()), size_value.clone()),
-            (DynamicValue::String("height".to_string()), size_value),
-        ]
-        .into_iter()
-        .collect();
-
-        let background_layers = DynamicValue::Array(vec![DynamicValue::Object(layer_object.into())].into());
-        let overlay = file.background.overlay_alpha.clamp(0.0, 0.60) as f64;
-        let window_background_opacity = (1.0 - overlay).clamp(0.40, 1.0);
-        let color_scheme = if normalize_readability_fg(file.readability.current_fg.as_str()) == "dark"
-        {
-            "Kaku Light"
-        } else {
-            "Kaku Dark"
-        };
-
-        let overrides: BTreeMap<DynamicValue, DynamicValue> = vec![
-            (
-                DynamicValue::String("background".to_string()),
-                background_layers,
-            ),
-            (
-                DynamicValue::String("window_background_opacity".to_string()),
-                DynamicValue::F64(window_background_opacity.into()),
-            ),
-            (
-                DynamicValue::String("text_background_opacity".to_string()),
-                DynamicValue::F64(1.0f64.into()),
-            ),
-            (
-                DynamicValue::String("color_scheme".to_string()),
-                DynamicValue::String(color_scheme.to_string()),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        Some(overrides)
-    }
-
-    fn sidebar_apply_background_overrides(
-        &mut self,
-        overrides: Option<BTreeMap<DynamicValue, DynamicValue>>,
-    ) {
-        let mut object: BTreeMap<DynamicValue, DynamicValue> = match &self.config_overrides {
-            DynamicValue::Object(obj) => obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            _ => BTreeMap::new(),
-        };
-
-        for key in [
-            "background",
-            "window_background_image",
-            "window_background_image_hsb",
-            "window_background_opacity",
-            "text_background_opacity",
-            "color_scheme",
-        ] {
-            object.remove(&DynamicValue::String(key.to_string()));
-        }
-
-        if let Some(new_values) = overrides {
-            for (key, value) in new_values {
-                object.insert(key, value);
-            }
-        }
-
-        let next = if object.is_empty() {
-            DynamicValue::Null
-        } else {
-            DynamicValue::Object(object.into())
-        };
-        if next != self.config_overrides {
-            self.config_overrides = next;
-            if let Some(window) = self.window.clone() {
-                self.schedule_silent_config_reload(&window);
-            }
-        }
-    }
-
-    fn sidebar_sync_background_from_settings(&mut self) {
-        let overrides = self
-            .sidebar_load_background_file()
-            .ok()
-            .and_then(|file| self.sidebar_build_background_override_values(&file));
-        self.sidebar_apply_background_overrides(overrides);
     }
 
     fn sidebar_request_set_background_image(&mut self) -> anyhow::Result<()> {

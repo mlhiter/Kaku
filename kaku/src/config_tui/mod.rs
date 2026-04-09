@@ -2,19 +2,19 @@ mod ui;
 
 use crate::assistant_config;
 use crate::utils::open_path_in_editor;
-use anyhow::Context;
+use anyhow::{Context, bail};
+use crossterm::ExecutableCommand;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::ExecutableCommand;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-const KAKU_AUTO_COLOR_SCHEME_EXPR: &str =
-    "(wezterm.gui and wezterm.gui.get_appearance() or 'Dark'):find('Dark') and 'Kaku Dark' or 'Kaku Light'";
+const KAKU_AUTO_COLOR_SCHEME_EXPR: &str = "(wezterm.gui and wezterm.gui.get_appearance() or 'Dark'):find('Dark') and 'Kaku Dark' or 'Kaku Light'";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NormalModeAction {
@@ -356,6 +356,15 @@ impl App {
             },
             ConfigField {
                 section: "Window",
+                key: "Background Image",
+                lua_key: "window_background_image",
+                value: String::new(),
+                default: String::new(),
+                options: vec![],
+                skip_write: false,
+            },
+            ConfigField {
+                section: "Window",
                 key: "Background Blur",
                 lua_key: "macos_window_background_blur",
                 value: String::new(),
@@ -669,6 +678,17 @@ impl App {
                     Some(raw.to_string())
                 }
             }
+            "window_background_image" => {
+                if raw.eq_ignore_ascii_case("nil")
+                    || raw.eq_ignore_ascii_case("true")
+                    || raw.eq_ignore_ascii_case("false")
+                    || Self::is_number_literal(raw)
+                {
+                    None
+                } else {
+                    Some(raw.to_string())
+                }
+            }
             "font_size"
             | "line_height"
             | "window_background_opacity"
@@ -885,6 +905,17 @@ impl App {
             && Self::hotkey_to_lua(&new_value).is_none()
         {
             new_value = self.edit_original.clone();
+        }
+
+        if field.lua_key == "window_background_image" {
+            let trimmed = new_value.trim();
+            if trimmed.is_empty() {
+                new_value.clear();
+            } else if let Ok(imported) = import_background_image_asset(trimmed) {
+                new_value = imported;
+            } else {
+                new_value = self.edit_original.clone();
+            }
         }
 
         self.fields[self.selected].value = new_value;
@@ -1181,6 +1212,7 @@ impl App {
                 }
             }
             "font" => format!("wezterm.font('{}')", field.value),
+            "window_background_image" => format!("'{}'", field.value),
             "font_size"
             | "line_height"
             | "window_background_opacity"
@@ -1296,11 +1328,80 @@ fn signal_config_changed() {
     let _ = std::io::stdout().flush();
 }
 
+fn background_assets_root() -> PathBuf {
+    config::HOME_DIR
+        .join(".kaku")
+        .join("assets")
+        .join("backgrounds")
+}
+
+fn resolve_background_image_input_path(raw: &str) -> anyhow::Result<PathBuf> {
+    let trimmed = raw.trim();
+    let expanded = if trimmed == "~" {
+        config::HOME_DIR.clone()
+    } else if let Some(suffix) = trimmed.strip_prefix("~/") {
+        config::HOME_DIR.join(suffix)
+    } else {
+        PathBuf::from(trimmed)
+    };
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()
+            .context("read current directory")?
+            .join(expanded)
+    };
+    if !absolute.is_file() {
+        bail!("background image file not found: {}", absolute.display());
+    }
+    Ok(absolute.canonicalize().unwrap_or(absolute))
+}
+
+fn import_background_image_asset(raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    let source = resolve_background_image_input_path(trimmed)?;
+    let assets_root = background_assets_root();
+    config::create_user_owned_dirs(&assets_root)
+        .with_context(|| format!("create {}", assets_root.display()))?;
+    let canonical_assets_root = assets_root.canonicalize().unwrap_or(assets_root.clone());
+
+    if source.starts_with(&canonical_assets_root) {
+        return Ok(source.to_string_lossy().into_owned());
+    }
+
+    let extension = source
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.trim().is_empty())
+        .unwrap_or("img");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let target = canonical_assets_root.join(format!(
+        "bg-{stamp:x}-{:x}.{}",
+        std::process::id(),
+        extension.to_ascii_lowercase()
+    ));
+    std::fs::copy(&source, &target).with_context(|| {
+        format!(
+            "copy background image from {} to {}",
+            source.display(),
+            target.display()
+        )
+    })?;
+    Ok(target.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_editable_config_exists, normal_mode_action, App, Mode, NormalModeAction,
-        KAKU_AUTO_COLOR_SCHEME_EXPR,
+        App, KAKU_AUTO_COLOR_SCHEME_EXPR, Mode, NormalModeAction, ensure_editable_config_exists,
+        normal_mode_action,
     };
     use crossterm::event::KeyCode;
     use std::path::PathBuf;
@@ -1642,6 +1743,28 @@ mod tests {
             App::normalize_value("macos_window_background_blur", "20"),
             Some("20".into())
         );
+    }
+
+    #[test]
+    fn window_background_image_accepts_string_paths() {
+        assert_eq!(
+            App::normalize_value("window_background_image", "/tmp/bg.png"),
+            Some("/tmp/bg.png".into())
+        );
+        assert_eq!(App::normalize_value("window_background_image", "nil"), None);
+    }
+
+    #[test]
+    fn window_background_image_serializes_as_lua_string() {
+        let mut app = test_app();
+        let idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "window_background_image")
+            .expect("window_background_image field to exist");
+        app.fields[idx].value = "/tmp/bg.png".to_string();
+
+        assert_eq!(app.to_lua_value(&app.fields[idx]), "'/tmp/bg.png'");
     }
 
     #[test]
