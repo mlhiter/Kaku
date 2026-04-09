@@ -91,6 +91,34 @@ impl Default for SessionsFile {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnippetsFile {
+    #[serde(default = "schema_version")]
+    version: u8,
+    #[serde(default)]
+    snippets: Vec<SnippetEntry>,
+}
+
+impl Default for SnippetsFile {
+    fn default() -> Self {
+        Self {
+            version: schema_version(),
+            snippets: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct SnippetEntry {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    content: String,
+    #[serde(default)]
+    updated_at: String,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct SessionEntry {
     id: String,
@@ -508,6 +536,22 @@ impl crate::TermWindow {
             SidebarAction::DeleteProject { project_id } => {
                 self.sidebar_request_delete_project(project_id.as_str())
             }
+            SidebarAction::CreateSnippet { project_id } => {
+                self.sidebar_request_create_snippet(project_id.as_str())
+            }
+            SidebarAction::InsertSnippet {
+                project_id,
+                snippet_id,
+            } => self.sidebar_insert_snippet(project_id.as_str(), snippet_id.as_str()),
+            SidebarAction::OpenSnippetContextMenu { .. } => Ok(()),
+            SidebarAction::EditSnippet {
+                project_id,
+                snippet_id,
+            } => self.sidebar_request_edit_snippet(project_id.as_str(), snippet_id.as_str()),
+            SidebarAction::DeleteSnippet {
+                project_id,
+                snippet_id,
+            } => self.sidebar_delete_snippet(project_id.as_str(), snippet_id.as_str()),
         }
     }
 
@@ -1394,7 +1438,8 @@ impl crate::TermWindow {
                 let pin = if session.pinned { "📌" } else { "·" };
                 let status = SidebarSessionStatus::parse(session.status.as_str());
                 let source = parse_session_status_source(session.status_source.as_str());
-                let confidence = parse_session_status_confidence(session.status_confidence.as_str());
+                let confidence =
+                    parse_session_status_confidence(session.status_confidence.as_str());
                 let is_animating = sidebar_status_is_animating(status);
                 if is_animating {
                     has_status_animation = true;
@@ -1484,12 +1529,81 @@ impl crate::TermWindow {
             self.update_next_frame_time(Some(Instant::now() + SIDEBAR_STATUS_SPINNER_INTERVAL));
         }
 
-        lines.push(SidebarLine::new("Resources", true).with_tone(SidebarLineTone::Info));
-        lines.push(SidebarLine::new("  Snippets (M3)", false).with_tone(SidebarLineTone::Muted));
-        lines.push(
-            SidebarLine::new("  Env (M3, plaintext)", false).with_tone(SidebarLineTone::Muted),
-        );
-        lines.push(SidebarLine::new("  Files (M3)", false).with_tone(SidebarLineTone::Muted));
+        let resources_project = self.sidebar_active_project_for_shortcuts();
+        if let Some(project_id) = resources_project.as_ref() {
+            let project_label = self.sidebar_project_display_name(project_id.as_str());
+            lines.push(
+                SidebarLine::new(format!("Resources ({project_label})"), true)
+                    .with_tone(SidebarLineTone::Info)
+                    .with_trailing_button(
+                        "+",
+                        SidebarAction::CreateSnippet {
+                            project_id: project_id.clone(),
+                        },
+                    ),
+            );
+
+            match self.sidebar_load_project_snippets(project_id.as_str()) {
+                Ok(snippets) => {
+                    if snippets.is_empty() {
+                        lines.push(
+                            SidebarLine::new("  Snippets: (none)", false)
+                                .with_tone(SidebarLineTone::Muted),
+                        );
+                    } else {
+                        lines.push(
+                            SidebarLine::new("  Snippets", false).with_tone(SidebarLineTone::Info),
+                        );
+                        for snippet in snippets.iter().take(8) {
+                            let snippet_name = truncate_middle(
+                                snippet.name.as_str(),
+                                line_char_budget.saturating_sub(8),
+                            );
+                            lines.push(
+                                SidebarLine::action(
+                                    format!("    > {snippet_name}"),
+                                    SidebarAction::InsertSnippet {
+                                        project_id: project_id.clone(),
+                                        snippet_id: snippet.id.clone(),
+                                    },
+                                )
+                                .with_trailing_button(
+                                    "⋯",
+                                    SidebarAction::OpenSnippetContextMenu {
+                                        project_id: project_id.clone(),
+                                        snippet_id: snippet.id.clone(),
+                                    },
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    lines.push(
+                        SidebarLine::new(
+                            format!(
+                                "  Snippets load error: {}",
+                                truncate_middle(
+                                    format!("{err:#}").as_str(),
+                                    line_char_budget.saturating_sub(8)
+                                )
+                            ),
+                            false,
+                        )
+                        .with_tone(SidebarLineTone::Warning),
+                    );
+                }
+            }
+
+            lines.push(SidebarLine::new("  Env (next)", false).with_tone(SidebarLineTone::Muted));
+            lines.push(SidebarLine::new("  Files (next)", false).with_tone(SidebarLineTone::Muted));
+        } else {
+            lines.push(SidebarLine::new("Resources", true).with_tone(SidebarLineTone::Info));
+            lines.push(
+                SidebarLine::new("  Select a project to manage resources", false)
+                    .with_tone(SidebarLineTone::Muted),
+            );
+        }
         lines.push(SidebarLine::new("", false));
 
         if let Some(error) = &self.workspace_sidebar.last_load_error {
@@ -1591,6 +1705,171 @@ impl crate::TermWindow {
 
         self.force_workspace_sidebar_refresh();
         self.show_toast(format!("Created project \"{}\".", project_name));
+        Ok(())
+    }
+
+    fn sidebar_load_project_snippets(&self, project_id: &str) -> anyhow::Result<Vec<SnippetEntry>> {
+        let snippets_path = sidebar_project_snippets_path(project_id);
+        let mut snippets_file: SnippetsFile = read_json_file_or_default(&snippets_path)?;
+        snippets_file
+            .snippets
+            .retain(|snippet| !snippet.id.trim().is_empty());
+        snippets_file
+            .snippets
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(snippets_file.snippets)
+    }
+
+    fn sidebar_snippet_content(
+        &self,
+        project_id: &str,
+        snippet_id: &str,
+    ) -> anyhow::Result<String> {
+        let snippets = self.sidebar_load_project_snippets(project_id)?;
+        let snippet = snippets
+            .into_iter()
+            .find(|snippet| snippet.id == snippet_id)
+            .ok_or_else(|| anyhow!("snippet not found: {project_id}/{snippet_id}"))?;
+        Ok(snippet.content)
+    }
+
+    fn sidebar_request_create_snippet(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let anchor = UIItem {
+            x: 12,
+            y: 32,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(260, 560),
+            height: row_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = crate::termwindow::tab_rename::TabRenameModal::new_create_snippet(
+            self,
+            project_id.to_string(),
+            anchor,
+        )?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_create_snippet_from_modal(
+        &mut self,
+        project_id: &str,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        let content = content.trim();
+        if content.is_empty() {
+            self.show_toast("Snippet cannot be empty".to_string());
+            return Ok(());
+        }
+
+        let snippets_path = sidebar_project_snippets_path(project_id);
+        let mut snippets_file: SnippetsFile = read_json_file_or_default(&snippets_path)?;
+        let now = Utc::now().to_rfc3339();
+        let name = derive_snippet_name(content);
+        snippets_file.snippets.push(SnippetEntry {
+            id: generate_sidebar_id("snip"),
+            name: name.clone(),
+            content: content.to_string(),
+            updated_at: now,
+        });
+        write_json_file_atomic(&snippets_path, &snippets_file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Added snippet \"{name}\"."));
+        Ok(())
+    }
+
+    fn sidebar_request_edit_snippet(
+        &mut self,
+        project_id: &str,
+        snippet_id: &str,
+    ) -> anyhow::Result<()> {
+        let initial_content = self.sidebar_snippet_content(project_id, snippet_id)?;
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let anchor = UIItem {
+            x: 12,
+            y: 32,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(260, 560),
+            height: row_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = crate::termwindow::tab_rename::TabRenameModal::new_edit_snippet(
+            self,
+            project_id.to_string(),
+            snippet_id.to_string(),
+            initial_content,
+            anchor,
+        )?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_edit_snippet_from_modal(
+        &mut self,
+        project_id: &str,
+        snippet_id: &str,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        let content = content.trim();
+        if content.is_empty() {
+            self.show_toast("Snippet cannot be empty".to_string());
+            return Ok(());
+        }
+
+        let snippets_path = sidebar_project_snippets_path(project_id);
+        let mut snippets_file: SnippetsFile = read_json_file_or_default(&snippets_path)?;
+        let snippet = snippets_file
+            .snippets
+            .iter_mut()
+            .find(|snippet| snippet.id == snippet_id)
+            .ok_or_else(|| anyhow!("snippet not found in storage: {snippet_id}"))?;
+        let name = derive_snippet_name(content);
+        snippet.name = name.clone();
+        snippet.content = content.to_string();
+        snippet.updated_at = Utc::now().to_rfc3339();
+        write_json_file_atomic(&snippets_path, &snippets_file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Updated snippet \"{name}\"."));
+        Ok(())
+    }
+
+    fn sidebar_insert_snippet(&mut self, project_id: &str, snippet_id: &str) -> anyhow::Result<()> {
+        let content = self.sidebar_snippet_content(project_id, snippet_id)?;
+        let pane = self
+            .get_active_pane_or_overlay()
+            .ok_or_else(|| anyhow!("no active pane to insert snippet"))?;
+        pane.send_paste(content.as_str())?;
+        self.show_toast("Snippet inserted".to_string());
+        Ok(())
+    }
+
+    fn sidebar_delete_snippet(&mut self, project_id: &str, snippet_id: &str) -> anyhow::Result<()> {
+        let snippets_path = sidebar_project_snippets_path(project_id);
+        let mut snippets_file: SnippetsFile = read_json_file_or_default(&snippets_path)?;
+        let idx = snippets_file
+            .snippets
+            .iter()
+            .position(|snippet| snippet.id == snippet_id)
+            .ok_or_else(|| anyhow!("snippet not found in storage: {snippet_id}"))?;
+        let removed = snippets_file.snippets.remove(idx);
+        write_json_file_atomic(&snippets_path, &snippets_file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Deleted snippet \"{}\".", removed.name));
         Ok(())
     }
 
@@ -2031,6 +2310,59 @@ impl crate::TermWindow {
                 SidebarAction::DeleteSession {
                     project_id,
                     session_id,
+                },
+            ),
+        ];
+
+        let anchor = UIItem {
+            x: mouse_x.max(0) as usize,
+            y: mouse_y.max(0) as usize,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(220, 360),
+            height: self
+                .render_metrics
+                .cell_size
+                .height
+                .max(1)
+                .saturating_add(8) as usize,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = SidebarContextMenuModal::new(self, anchor, items)?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_open_snippet_context_menu(
+        &mut self,
+        project_id: &str,
+        snippet_id: &str,
+        mouse_x: isize,
+        mouse_y: isize,
+    ) -> anyhow::Result<()> {
+        let project_id = project_id.to_string();
+        let snippet_id = snippet_id.to_string();
+        let items = vec![
+            SidebarContextMenuItem::new(
+                "Insert Snippet",
+                SidebarAction::InsertSnippet {
+                    project_id: project_id.clone(),
+                    snippet_id: snippet_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                "Edit Snippet",
+                SidebarAction::EditSnippet {
+                    project_id: project_id.clone(),
+                    snippet_id: snippet_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::danger(
+                "Delete Snippet",
+                SidebarAction::DeleteSnippet {
+                    project_id,
+                    snippet_id,
                 },
             ),
         ];
@@ -2546,8 +2878,36 @@ fn sidebar_ui_state_path() -> PathBuf {
     sidebar_state_root().join(SIDEBAR_UI_STATE_RELATIVE_PATH)
 }
 
+fn sidebar_project_resources_root(project_id: &str) -> PathBuf {
+    sidebar_state_root()
+        .join("projects")
+        .join(project_id)
+        .join("resources")
+}
+
+fn sidebar_project_snippets_path(project_id: &str) -> PathBuf {
+    sidebar_project_resources_root(project_id).join("snippets.json")
+}
+
 fn sidebar_session_key(project_id: &str, session_id: &str) -> String {
     format!("{project_id}::{session_id}")
+}
+
+fn derive_snippet_name(content: &str) -> String {
+    let compact = content
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let candidate = if compact.is_empty() {
+        content.trim()
+    } else {
+        compact.as_str()
+    };
+    if candidate.is_empty() {
+        return "snippet".to_string();
+    }
+    truncate_middle(candidate, 36)
 }
 
 fn ensure_sidebar_project_for_cwd(cwd: &Path) -> anyhow::Result<String> {
@@ -2601,19 +2961,19 @@ fn ensure_sidebar_project_has_session(project_id: &str) -> anyhow::Result<String
         .join("sessions.json");
     let mut sessions_file: SessionsFile = read_json_file_or_default(&sessions_path)?;
 
-        if sessions_file.sessions.is_empty() {
-            let now = Utc::now().to_rfc3339();
-            let session_id = generate_sidebar_id("sess");
-            sessions_file.sessions.push(SessionEntry {
-                id: session_id.clone(),
-                title: "session-1".to_string(),
-                status: SessionStatus::Idle.as_storage_str().to_string(),
-                codex_thread_id: String::new(),
-                status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
-                status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
-                status_reason: String::new(),
-                pinned: false,
-                updated_at: now,
+    if sessions_file.sessions.is_empty() {
+        let now = Utc::now().to_rfc3339();
+        let session_id = generate_sidebar_id("sess");
+        sessions_file.sessions.push(SessionEntry {
+            id: session_id.clone(),
+            title: "session-1".to_string(),
+            status: SessionStatus::Idle.as_storage_str().to_string(),
+            codex_thread_id: String::new(),
+            status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+            status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+            status_reason: String::new(),
+            pinned: false,
+            updated_at: now,
         });
         write_json_file_atomic(&sessions_path, &sessions_file)?;
         return Ok(session_id);
@@ -2892,7 +3252,9 @@ fn sidebar_next_session_title(existing: &[SessionEntry]) -> String {
 fn sidebar_action_needs_pointer_position(action: &SidebarAction) -> bool {
     matches!(
         action,
-        SidebarAction::OpenSessionContextMenu { .. } | SidebarAction::OpenProjectContextMenu { .. }
+        SidebarAction::OpenSessionContextMenu { .. }
+            | SidebarAction::OpenProjectContextMenu { .. }
+            | SidebarAction::OpenSnippetContextMenu { .. }
     )
 }
 
@@ -3000,13 +3362,12 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 mod tests {
     use super::{
         is_codex_command, is_codex_process_name, is_stale_transient_session_status,
-        normalize_transient_session_status,
-        parse_session_status_confidence, parse_session_status_source, sidebar_status_is_animating,
-        sidebar_status_signal_tag, sidebar_status_spinner_frame,
-        pick_project_for_cwd, pick_session_for_inferred_binding,
-        sidebar_action_needs_pointer_position, sidebar_next_session_title, SessionEntry,
-        SidebarAction, SidebarLineTone, SidebarSessionStatus, WorkspaceSidebarProject,
-        WorkspaceSidebarSession,
+        normalize_transient_session_status, parse_session_status_confidence,
+        parse_session_status_source, pick_project_for_cwd, pick_session_for_inferred_binding,
+        sidebar_action_needs_pointer_position, sidebar_next_session_title,
+        sidebar_status_is_animating, sidebar_status_signal_tag, sidebar_status_spinner_frame,
+        SessionEntry, SidebarAction, SidebarLineTone, SidebarSessionStatus,
+        WorkspaceSidebarProject, WorkspaceSidebarSession,
     };
     use crate::agent_status::events::{
         SessionStatus, SessionStatusConfidence, SessionStatusSource,
@@ -3125,10 +3486,7 @@ mod tests {
             "H+"
         );
         assert_eq!(
-            sidebar_status_signal_tag(
-                SessionStatusSource::Heuristic,
-                SessionStatusConfidence::Low,
-            ),
+            sidebar_status_signal_tag(SessionStatusSource::Heuristic, SessionStatusConfidence::Low,),
             "H?"
         );
     }
@@ -3137,13 +3495,18 @@ mod tests {
     fn running_and_loading_statuses_animate() {
         assert!(sidebar_status_is_animating(SidebarSessionStatus::Loading));
         assert!(!sidebar_status_is_animating(SidebarSessionStatus::Running));
-        assert!(!sidebar_status_is_animating(SidebarSessionStatus::NeedApprove));
+        assert!(!sidebar_status_is_animating(
+            SidebarSessionStatus::NeedApprove
+        ));
         assert!(!sidebar_status_is_animating(SidebarSessionStatus::Done));
     }
 
     #[test]
     fn spinner_frame_cycles_in_expected_order() {
-        assert_eq!(sidebar_status_spinner_frame(std::time::Duration::from_millis(0)), '-');
+        assert_eq!(
+            sidebar_status_spinner_frame(std::time::Duration::from_millis(0)),
+            '-'
+        );
         assert_eq!(
             sidebar_status_spinner_frame(std::time::Duration::from_millis(120)),
             '\\'
@@ -3202,6 +3565,12 @@ mod tests {
         assert!(sidebar_action_needs_pointer_position(
             &SidebarAction::OpenProjectContextMenu {
                 project_id: "proj".to_string()
+            }
+        ));
+        assert!(sidebar_action_needs_pointer_position(
+            &SidebarAction::OpenSnippetContextMenu {
+                project_id: "proj".to_string(),
+                snippet_id: "snip".to_string(),
             }
         ));
         assert!(!sidebar_action_needs_pointer_position(

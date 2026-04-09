@@ -606,6 +606,25 @@ pub enum SidebarAction {
     DeleteProject {
         project_id: String,
     },
+    CreateSnippet {
+        project_id: String,
+    },
+    InsertSnippet {
+        project_id: String,
+        snippet_id: String,
+    },
+    OpenSnippetContextMenu {
+        project_id: String,
+        snippet_id: String,
+    },
+    EditSnippet {
+        project_id: String,
+        snippet_id: String,
+    },
+    DeleteSnippet {
+        project_id: String,
+        snippet_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -39,6 +39,13 @@ enum RenameTarget {
         session_id: String,
     },
     CreateProject,
+    CreateSnippet {
+        project_id: String,
+    },
+    EditSnippet {
+        project_id: String,
+        snippet_id: String,
+    },
 }
 
 pub struct TabRenameModal {
@@ -163,6 +170,50 @@ impl TabRenameModal {
             style_tab_id,
             anchor,
             value: RefCell::new(value),
+            cursor: RefCell::new(cursor),
+            selection: RefCell::new(None),
+        };
+        modal.reconfigure(term_window);
+        Ok(modal)
+    }
+
+    pub fn new_create_snippet(
+        term_window: &mut TermWindow,
+        project_id: String,
+        anchor: UIItem,
+    ) -> anyhow::Result<Self> {
+        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for prompt")?;
+        let modal = Self {
+            element: RefCell::new(None),
+            target: RenameTarget::CreateSnippet { project_id },
+            style_tab_id,
+            anchor,
+            value: RefCell::new(String::new()),
+            cursor: RefCell::new(0),
+            selection: RefCell::new(None),
+        };
+        modal.reconfigure(term_window);
+        Ok(modal)
+    }
+
+    pub fn new_edit_snippet(
+        term_window: &mut TermWindow,
+        project_id: String,
+        snippet_id: String,
+        initial_content: String,
+        anchor: UIItem,
+    ) -> anyhow::Result<Self> {
+        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for prompt")?;
+        let cursor = initial_content.chars().count();
+        let modal = Self {
+            element: RefCell::new(None),
+            target: RenameTarget::EditSnippet {
+                project_id,
+                snippet_id,
+            },
+            style_tab_id,
+            anchor,
+            value: RefCell::new(initial_content),
             cursor: RefCell::new(cursor),
             selection: RefCell::new(None),
         };
@@ -441,6 +492,27 @@ impl TabRenameModal {
                 if let Err(err) = term_window.sidebar_create_project_from_modal(value.as_str()) {
                     log::warn!("create project from modal failed: {:#}", err);
                     term_window.show_toast("Failed to create project".to_string());
+                }
+            }
+            RenameTarget::CreateSnippet { project_id } => {
+                if let Err(err) = term_window
+                    .sidebar_create_snippet_from_modal(project_id.as_str(), value.as_str())
+                {
+                    log::warn!("create snippet from modal failed: {:#}", err);
+                    term_window.show_toast("Failed to create snippet".to_string());
+                }
+            }
+            RenameTarget::EditSnippet {
+                project_id,
+                snippet_id,
+            } => {
+                if let Err(err) = term_window.sidebar_edit_snippet_from_modal(
+                    project_id.as_str(),
+                    snippet_id.as_str(),
+                    value.as_str(),
+                ) {
+                    log::warn!("edit snippet from modal failed: {:#}", err);
+                    term_window.show_toast("Failed to update snippet".to_string());
                 }
             }
         }
