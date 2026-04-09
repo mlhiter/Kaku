@@ -983,9 +983,10 @@ impl super::TermWindow {
             Some(pane) => pane,
             None => return,
         };
+        let pane_id = pane.pane_id();
 
         if window_key.key_is_down {
-            let mut state = self.pane_state(pane.pane_id());
+            let mut state = self.pane_state(pane_id);
             if state.has_unread_bell {
                 state.has_unread_bell = false;
                 drop(state);
@@ -1004,7 +1005,7 @@ impl super::TermWindow {
         };
 
         if window_key.key_is_down
-            && self.pane_state(pane.pane_id()).overlay.is_none()
+            && self.pane_state(pane_id).overlay.is_none()
             && !leader_active
             && !self.should_preserve_line_editor_selection_for_key(&window_key)
         {

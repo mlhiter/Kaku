@@ -754,6 +754,69 @@ function __kaku_set_user_var
     end
 end
 
+# Codex managed channel wrapper:
+# - spawn dedicated app-server
+# - announce ws endpoint to GUI via user-var
+# - route codex through --remote
+set -g __kaku_codex_seed 0
+
+function __kaku_codex_managed_ws_url
+    set -l base 46080
+    set -l span 4096
+    if test "$__kaku_codex_seed" = 0
+        set -g __kaku_codex_seed $RANDOM
+    else
+        set -g __kaku_codex_seed (math "($__kaku_codex_seed + 1) % $span")
+    end
+
+    set -l pane_part 0
+    if set -q WEZTERM_PANE
+        set -l pane_hex (string replace -r '^%' '' -- "$WEZTERM_PANE")
+        if test -n "$pane_hex"
+            set pane_part (math "0x$pane_hex % $span" 2>/dev/null; or echo 0)
+        end
+    end
+
+    set -l offset (math "($pane_part + $__kaku_codex_seed) % $span")
+    set -l port (math "$base + $offset")
+    printf 'ws://127.0.0.1:%s\n' $port
+end
+
+function __kaku_codex_emit_stop
+    __kaku_set_user_var kaku_codex_app_server_ws __stop__
+    __kaku_set_user_var kaku_codex_app_server_token ''
+end
+
+if not functions -q codex
+    function codex
+        if test (count $argv) -gt 0
+            command codex $argv
+            return $status
+        end
+
+        set -l ws_url (__kaku_codex_managed_ws_url)
+
+        command codex app-server --listen "$ws_url" >/tmp/kaku-codex-app-server.log 2>&1 &
+        set -l server_pid $last_pid
+        sleep 0.2
+
+        if not kill -0 $server_pid >/dev/null 2>&1
+            __kaku_codex_emit_stop
+            command codex $argv
+            return $status
+        end
+
+        __kaku_set_user_var kaku_codex_app_server_ws "$ws_url"
+        command codex --remote "$ws_url" $argv
+        set -l exit_code $status
+
+        __kaku_codex_emit_stop
+        kill $server_pid >/dev/null 2>&1; or true
+        wait $server_pid >/dev/null 2>&1; or true
+        return $exit_code
+    end
+end
+
 # Capture last command for AI suggestion (preexec fires before command runs)
 function __kaku_ai_preexec --on-event fish_preexec
     if set -q KAKU_AUTO_DISABLE

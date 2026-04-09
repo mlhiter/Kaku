@@ -41,7 +41,7 @@ pub struct AgentAdapterRegistry {
 impl AgentAdapterRegistry {
     pub fn with_defaults() -> Self {
         let mut registry = Self::default();
-        registry.register(Box::new(CodexAdapter::default()));
+        registry.register(Box::new(CodexAdapter::structured_only()));
         registry.register(Box::new(ClaudeAdapter::default()));
         registry
     }

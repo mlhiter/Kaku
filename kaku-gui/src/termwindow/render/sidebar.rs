@@ -1,3 +1,7 @@
+use crate::agent_status::codex_context::{
+    is_codex_like_command as shared_is_codex_like_command,
+    is_codex_process_name as shared_is_codex_process_name,
+};
 use crate::agent_status::events::{SessionStatus, SessionStatusConfidence, SessionStatusSource};
 use crate::agent_status::manager::SessionStatusSnapshot;
 use crate::quad::TripleLayerQuadAllocator;
@@ -33,6 +37,7 @@ const SIDEBAR_DEFAULT_VISIBLE: bool = true;
 const SIDEBAR_RESIZE_HANDLE_WIDTH_PX: usize = 8;
 const SIDEBAR_REFRESH_INTERVAL: Duration = Duration::from_millis(1200);
 const SIDEBAR_TRANSIENT_STATUS_STALE_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+const SIDEBAR_STATUS_SPINNER_INTERVAL: Duration = Duration::from_millis(120);
 const SIDEBAR_TEXT_LEFT_PADDING: f32 = 12.0;
 const SIDEBAR_TEXT_TOP_PADDING: f32 = 12.0;
 const SIDEBAR_UI_STATE_RELATIVE_PATH: &str = "gui/sidebar.json";
@@ -92,6 +97,8 @@ struct SessionEntry {
     title: String,
     #[serde(default)]
     status: String,
+    #[serde(default)]
+    codex_thread_id: String,
     #[serde(default)]
     status_source: String,
     #[serde(default)]
@@ -233,7 +240,7 @@ impl SidebarSessionStatus {
             Self::Idle => "IDLE",
             Self::Loading => "PREP",
             Self::NeedApprove => "APPROVAL",
-            Self::Running => "LOADING",
+            Self::Running => "RUNNING",
             Self::Done => "DONE",
             Self::Error => "ERROR",
             Self::Unknown => "UNKNOWN",
@@ -253,7 +260,7 @@ impl SidebarSessionStatus {
 }
 
 fn parse_session_status_source(value: &str) -> SessionStatusSource {
-    SessionStatusSource::parse_storage(value).unwrap_or(SessionStatusSource::Heuristic)
+    SessionStatusSource::parse_storage(value).unwrap_or(SessionStatusSource::Structured)
 }
 
 fn parse_session_status_confidence(value: &str) -> SessionStatusConfidence {
@@ -277,6 +284,17 @@ fn sidebar_status_source_label(source: SessionStatusSource) -> &'static str {
         SessionStatusSource::Structured => "structured",
         SessionStatusSource::Heuristic => "heuristic",
     }
+}
+
+fn sidebar_status_is_animating(status: SidebarSessionStatus) -> bool {
+    matches!(status, SidebarSessionStatus::Loading)
+}
+
+fn sidebar_status_spinner_frame(elapsed: Duration) -> char {
+    const FRAMES: [char; 4] = ['-', '\\', '|', '/'];
+    let interval_ms = SIDEBAR_STATUS_SPINNER_INTERVAL.as_millis().max(1);
+    let frame_idx = ((elapsed.as_millis() / interval_ms) % FRAMES.len() as u128) as usize;
+    FRAMES[frame_idx]
 }
 
 #[derive(Debug, Clone)]
@@ -647,6 +665,11 @@ impl crate::TermWindow {
         }
         let session_id = session_id?;
         self.sidebar_bind_session_to_tab(project_id.as_str(), session_id.as_str(), tab_id);
+        self.sidebar_reset_transient_status_for_non_codex_context(
+            project_id.as_str(),
+            session_id.as_str(),
+            &pane,
+        );
         log::info!(
             "workspace sidebar: inferred tab binding pane={} tab={} cwd={} -> {}/{}",
             pane_id,
@@ -656,6 +679,59 @@ impl crate::TermWindow {
             session_id
         );
         Some((project_id, session_id))
+    }
+
+    fn sidebar_reset_transient_status_for_non_codex_context(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        pane: &std::sync::Arc<dyn mux::pane::Pane>,
+    ) {
+        let user_vars = pane.copy_user_vars();
+        let live_command = user_vars
+            .get("WEZTERM_PROG")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty());
+        let foreground_process_name = pane.get_foreground_process_name(CachePolicy::FetchImmediate);
+        let is_codex_context = live_command.is_some_and(is_codex_command)
+            || foreground_process_name
+                .as_deref()
+                .is_some_and(is_codex_process_name);
+        if is_codex_context {
+            return;
+        }
+
+        let Some(snapshot) = self.sidebar_session_status_snapshot(project_id, session_id) else {
+            return;
+        };
+        let is_transient = matches!(
+            snapshot.status,
+            SessionStatus::Loading | SessionStatus::NeedApprove | SessionStatus::Running
+        );
+        if !(is_transient
+            && snapshot.source == SessionStatusSource::Heuristic
+            && snapshot.confidence == SessionStatusConfidence::Low)
+        {
+            return;
+        }
+
+        if let Err(err) = self.sidebar_set_session_status_snapshot(
+            project_id,
+            session_id,
+            &SessionStatusSnapshot::new(
+                SessionStatus::Idle,
+                SessionStatusSource::Heuristic,
+                SessionStatusConfidence::Low,
+                None,
+            ),
+        ) {
+            log::warn!(
+                "workspace sidebar: failed to reset transient non-codex status {}/{}: {:#}",
+                project_id,
+                session_id,
+                err
+            );
+        }
     }
 
     pub(crate) fn sidebar_session_status_snapshot(
@@ -1167,7 +1243,7 @@ impl crate::TermWindow {
                             }
                             if session.status_source.is_empty() {
                                 session.status_source =
-                                    SessionStatusSource::Heuristic.as_storage_str().to_string();
+                                    SessionStatusSource::Structured.as_storage_str().to_string();
                                 repaired = true;
                             }
                             if session.status_confidence.is_empty() {
@@ -1184,7 +1260,7 @@ impl crate::TermWindow {
                             if normalized_status != session.status {
                                 session.status = normalized_status;
                                 session.status_source =
-                                    SessionStatusSource::Heuristic.as_storage_str().to_string();
+                                    SessionStatusSource::Structured.as_storage_str().to_string();
                                 session.status_confidence =
                                     SessionStatusConfidence::Low.as_storage_str().to_string();
                                 session.status_reason.clear();
@@ -1263,6 +1339,7 @@ impl crate::TermWindow {
     fn build_workspace_sidebar_lines(&mut self) -> Vec<SidebarLine> {
         let line_char_budget = self.sidebar_line_char_budget();
         let active_session = self.sidebar_current_session_binding_for_render();
+        let mut has_status_animation = false;
         let mut lines = vec![
             SidebarLine::new("WORKSPACE", true).with_tone(SidebarLineTone::Info),
             SidebarLine::new("", false),
@@ -1318,11 +1395,24 @@ impl crate::TermWindow {
                 let status = SidebarSessionStatus::parse(session.status.as_str());
                 let source = parse_session_status_source(session.status_source.as_str());
                 let confidence = parse_session_status_confidence(session.status_confidence.as_str());
-                let status_chip = format!(
-                    "[{pin}|{}|{}]",
-                    status.badge(),
-                    sidebar_status_signal_tag(source, confidence)
-                );
+                let is_animating = sidebar_status_is_animating(status);
+                if is_animating {
+                    has_status_animation = true;
+                }
+                let status_chip = if is_animating {
+                    let spinner = sidebar_status_spinner_frame(self.created.elapsed());
+                    format!(
+                        "[{pin}|{}|{}|{spinner}]",
+                        status.badge(),
+                        sidebar_status_signal_tag(source, confidence)
+                    )
+                } else {
+                    format!(
+                        "[{pin}|{}|{}]",
+                        status.badge(),
+                        sidebar_status_signal_tag(source, confidence)
+                    )
+                };
                 let session_title_budget = line_char_budget
                     .saturating_sub(status_chip.chars().count().saturating_add(4))
                     .max(12);
@@ -1388,6 +1478,10 @@ impl crate::TermWindow {
             }
 
             lines.push(SidebarLine::new("", false));
+        }
+
+        if has_status_animation {
+            self.update_next_frame_time(Some(Instant::now() + SIDEBAR_STATUS_SPINNER_INTERVAL));
         }
 
         lines.push(SidebarLine::new("Resources", true).with_tone(SidebarLineTone::Info));
@@ -1513,6 +1607,7 @@ impl crate::TermWindow {
             id: session_id.clone(),
             title,
             status: SessionStatus::Idle.as_storage_str().to_string(),
+            codex_thread_id: String::new(),
             status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
             status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
             status_reason: String::new(),
@@ -2506,18 +2601,19 @@ fn ensure_sidebar_project_has_session(project_id: &str) -> anyhow::Result<String
         .join("sessions.json");
     let mut sessions_file: SessionsFile = read_json_file_or_default(&sessions_path)?;
 
-    if sessions_file.sessions.is_empty() {
-        let now = Utc::now().to_rfc3339();
-        let session_id = generate_sidebar_id("sess");
-        sessions_file.sessions.push(SessionEntry {
-            id: session_id.clone(),
-            title: "session-1".to_string(),
-            status: SessionStatus::Idle.as_storage_str().to_string(),
-            status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
-            status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
-            status_reason: String::new(),
-            pinned: false,
-            updated_at: now,
+        if sessions_file.sessions.is_empty() {
+            let now = Utc::now().to_rfc3339();
+            let session_id = generate_sidebar_id("sess");
+            sessions_file.sessions.push(SessionEntry {
+                id: session_id.clone(),
+                title: "session-1".to_string(),
+                status: SessionStatus::Idle.as_storage_str().to_string(),
+                codex_thread_id: String::new(),
+                status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
+                status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
+                status_reason: String::new(),
+                pinned: false,
+                updated_at: now,
         });
         write_json_file_atomic(&sessions_path, &sessions_file)?;
         return Ok(session_id);
@@ -2633,6 +2729,14 @@ fn normalize_transient_session_status(
         .map(SessionStatus::as_storage_str)
         .unwrap_or(SessionStatus::Idle.as_storage_str())
         .to_string()
+}
+
+fn is_codex_command(command: &str) -> bool {
+    shared_is_codex_like_command(command)
+}
+
+fn is_codex_process_name(process_name: &str) -> bool {
+    shared_is_codex_process_name(process_name)
 }
 
 fn is_stale_transient_session_status(status: &str, updated_at: &str, now: DateTime<Utc>) -> bool {
@@ -2895,8 +2999,10 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_stale_transient_session_status, normalize_transient_session_status,
-        parse_session_status_confidence, parse_session_status_source, sidebar_status_signal_tag,
+        is_codex_command, is_codex_process_name, is_stale_transient_session_status,
+        normalize_transient_session_status,
+        parse_session_status_confidence, parse_session_status_source, sidebar_status_is_animating,
+        sidebar_status_signal_tag, sidebar_status_spinner_frame,
         pick_project_for_cwd, pick_session_for_inferred_binding,
         sidebar_action_needs_pointer_position, sidebar_next_session_title, SessionEntry,
         SidebarAction, SidebarLineTone, SidebarSessionStatus, WorkspaceSidebarProject,
@@ -2945,7 +3051,7 @@ mod tests {
             ),
             (
                 SidebarSessionStatus::Running,
-                "LOADING",
+                "RUNNING",
                 SidebarLineTone::Info,
             ),
             (SidebarSessionStatus::Done, "DONE", SidebarLineTone::Success),
@@ -2979,7 +3085,7 @@ mod tests {
         );
         assert_eq!(
             parse_session_status_source("unknown"),
-            SessionStatusSource::Heuristic
+            SessionStatusSource::Structured
         );
         assert_eq!(
             parse_session_status_confidence("high"),
@@ -3028,12 +3134,42 @@ mod tests {
     }
 
     #[test]
+    fn running_and_loading_statuses_animate() {
+        assert!(sidebar_status_is_animating(SidebarSessionStatus::Loading));
+        assert!(!sidebar_status_is_animating(SidebarSessionStatus::Running));
+        assert!(!sidebar_status_is_animating(SidebarSessionStatus::NeedApprove));
+        assert!(!sidebar_status_is_animating(SidebarSessionStatus::Done));
+    }
+
+    #[test]
+    fn spinner_frame_cycles_in_expected_order() {
+        assert_eq!(sidebar_status_spinner_frame(std::time::Duration::from_millis(0)), '-');
+        assert_eq!(
+            sidebar_status_spinner_frame(std::time::Duration::from_millis(120)),
+            '\\'
+        );
+        assert_eq!(
+            sidebar_status_spinner_frame(std::time::Duration::from_millis(240)),
+            '|'
+        );
+        assert_eq!(
+            sidebar_status_spinner_frame(std::time::Duration::from_millis(360)),
+            '/'
+        );
+        assert_eq!(
+            sidebar_status_spinner_frame(std::time::Duration::from_millis(480)),
+            '-'
+        );
+    }
+
+    #[test]
     fn next_session_title_skips_existing_suffix() {
         let existing = vec![
             SessionEntry {
                 id: "sess_1".to_string(),
                 title: "session-1".to_string(),
                 status: SessionStatus::Idle.as_storage_str().to_string(),
+                codex_thread_id: String::new(),
                 status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
                 status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
                 status_reason: String::new(),
@@ -3044,6 +3180,7 @@ mod tests {
                 id: "sess_2".to_string(),
                 title: "session-2".to_string(),
                 status: SessionStatus::Idle.as_storage_str().to_string(),
+                codex_thread_id: String::new(),
                 status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
                 status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
                 status_reason: String::new(),
@@ -3223,5 +3360,26 @@ mod tests {
             updated_recent.as_str(),
             now,
         ));
+    }
+
+    #[test]
+    fn detects_codex_context_helpers() {
+        assert!(is_codex_command("codex run"));
+        assert!(is_codex_command("env A=1 codex run"));
+        assert!(!is_codex_command("echo codex"));
+        assert!(is_codex_process_name("codex"));
+        assert!(is_codex_process_name("/usr/local/bin/codex"));
+        assert!(!is_codex_process_name("zsh"));
+    }
+
+    #[test]
+    fn preserves_structured_high_confidence_transient_status() {
+        let now = Utc::now();
+        let normalized = normalize_transient_session_status(
+            SessionStatus::Running.as_storage_str(),
+            now.to_rfc3339().as_str(),
+            now,
+        );
+        assert_eq!(normalized, SessionStatus::Running.as_storage_str());
     }
 }

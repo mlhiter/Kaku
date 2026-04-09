@@ -524,24 +524,28 @@ if [[ "${KAKU_SKIP_TOOL_BOOTSTRAP:-0}" != "1" ]]; then
 	fi
 fi
 
-# Validate required plugin directories up front.
-# setup_zsh.sh may be run standalone, so provide a clear dependency hint.
+# Best effort plugin install. Missing vendor bundles should not block shell init generation.
+# setup_zsh.sh may run standalone without downloaded vendor assets.
+typeset -a _kaku_installed_plugins=()
 for plugin in fast-syntax-highlighting zsh-autosuggestions zsh-completions; do
-	if [[ ! -d "$VENDOR_DIR/$plugin" ]]; then
-		echo -e "${YELLOW}Error: Missing plugin vendor directory: $VENDOR_DIR/$plugin${NC}"
-		echo -e "${YELLOW}Hint: Run scripts/download_vendor.sh before setup_zsh.sh.${NC}"
-		exit 1
+	if [[ -d "$VENDOR_DIR/$plugin" ]]; then
+		cp -R "$VENDOR_DIR/$plugin" "$USER_CONFIG_DIR/plugins/"
+		_kaku_installed_plugins+=("$plugin")
+	else
+		echo -e "${YELLOW}Warning: Missing plugin vendor directory: $VENDOR_DIR/$plugin${NC}"
+		echo -e "${YELLOW}Hint: Run scripts/download_vendor.sh to install optional plugins.${NC}"
 	fi
 done
 
-# Remove legacy plugins replaced in this version
-rm -rf "$USER_CONFIG_DIR/plugins/zsh-z"
-rm -rf "$USER_CONFIG_DIR/plugins/zsh-syntax-highlighting"
-# Copy Plugins
-cp -R "$VENDOR_DIR/fast-syntax-highlighting" "$USER_CONFIG_DIR/plugins/"
-cp -R "$VENDOR_DIR/zsh-autosuggestions" "$USER_CONFIG_DIR/plugins/"
-cp -R "$VENDOR_DIR/zsh-completions" "$USER_CONFIG_DIR/plugins/"
-echo -e "  ${GREEN}✓${NC} ${BOLD}Tools${NC}       Installed Zsh plugins ${NC}(~/.config/kaku/zsh/plugins)${NC}"
+# Remove legacy plugins replaced in this version (best effort).
+rm -rf "$USER_CONFIG_DIR/plugins/zsh-z" 2>/dev/null || true
+rm -rf "$USER_CONFIG_DIR/plugins/zsh-syntax-highlighting" 2>/dev/null || true
+
+if (( ${#_kaku_installed_plugins[@]} > 0 )); then
+	echo -e "  ${GREEN}✓${NC} ${BOLD}Tools${NC}       Installed Zsh plugins ${NC}(~/.config/kaku/zsh/plugins)${NC}"
+else
+	echo -e "${YELLOW}Warning: No bundled Zsh plugins installed. Continuing with minimal shell integration.${NC}"
+fi
 
 # Copy Starship Config (if not exists)
 if [[ ! -f "$STARSHIP_CONFIG" ]]; then
@@ -1223,6 +1227,66 @@ _kaku_set_user_var() {
         printf "\033]1337;SetUserVar=%s=%s\007" "\$name" "\$encoded"
     fi
 }
+
+# Codex managed channel wrapper:
+# - spawn a dedicated app-server
+# - announce ws endpoint to GUI via user-var
+# - route codex through --remote
+typeset -g _kaku_codex_managed_seed=0
+
+_kaku_codex_managed_ws_url() {
+    local base=46080
+    local span=4096
+    if [[ "\${_kaku_codex_managed_seed:-0}" == "0" ]]; then
+        _kaku_codex_managed_seed="\$RANDOM"
+    else
+        _kaku_codex_managed_seed=\$(( (_kaku_codex_managed_seed + 1) % span ))
+    fi
+    local pane_part=0
+    if [[ -n "\${WEZTERM_PANE:-}" && "\${WEZTERM_PANE}" == %* ]]; then
+        pane_part=\$(( 16#\${WEZTERM_PANE#%} % span ))
+    fi
+    local offset=\$(( (pane_part + _kaku_codex_managed_seed) % span ))
+    local port=\$(( base + offset ))
+    printf 'ws://127.0.0.1:%d\n' "\$port"
+}
+
+_kaku_codex_emit_stop() {
+    _kaku_set_user_var "kaku_codex_app_server_ws" "__stop__"
+    _kaku_set_user_var "kaku_codex_app_server_token" ""
+}
+
+if ! (( \${+functions[codex]} )); then
+    function codex {
+        local ws_url server_pid exit_code
+
+        if (( \$# > 0 )); then
+            command codex "\$@"
+            return \$?
+        fi
+
+        ws_url="\$(_kaku_codex_managed_ws_url)"
+
+        command codex app-server --listen "\$ws_url" >/tmp/kaku-codex-app-server.log 2>&1 &
+        server_pid=\$!
+        sleep 0.2
+
+        if ! kill -0 "\$server_pid" >/dev/null 2>&1; then
+            _kaku_codex_emit_stop
+            command codex "\$@"
+            return \$?
+        fi
+
+        _kaku_set_user_var "kaku_codex_app_server_ws" "\$ws_url"
+        command codex --remote "\$ws_url" "\$@"
+        exit_code=\$?
+
+        _kaku_codex_emit_stop
+        kill "\$server_pid" >/dev/null 2>&1 || true
+        wait "\$server_pid" >/dev/null 2>&1 || true
+        return \$exit_code
+    }
+fi
 
 # Only emit exit code when a real command was executed.
 # Empty Enter should not re-trigger AI suggestions for the previous failure.

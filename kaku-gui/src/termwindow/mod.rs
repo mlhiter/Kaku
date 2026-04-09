@@ -80,6 +80,7 @@ pub mod background;
 pub mod box_model;
 pub mod charselect;
 pub mod clipboard;
+mod codex_app_server;
 pub mod keyevent;
 pub mod modal;
 mod mouseevent;
@@ -174,6 +175,12 @@ struct PendingSessionStatusWrite {
     project_id: String,
     session_id: String,
     snapshot: SessionStatusSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct CodexAppServerPaneChannel {
+    url: String,
+    stop_flag: Arc<AtomicBool>,
 }
 
 fn decode_hex_event_payload(payload: &str) -> Option<String> {
@@ -996,8 +1003,7 @@ pub struct TermWindow {
     agent_adapter_registry: AgentAdapterRegistry,
     pending_session_status_writes: HashMap<String, PendingSessionStatusWrite>,
     session_status_flush_scheduled: bool,
-    agent_output_probe_at_by_pane: HashMap<PaneId, Instant>,
-    agent_output_probe_grace_until_by_pane: HashMap<PaneId, Instant>,
+    codex_app_server_channels_by_pane: HashMap<PaneId, CodexAppServerPaneChannel>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -1588,8 +1594,7 @@ impl TermWindow {
             agent_adapter_registry: AgentAdapterRegistry::with_defaults(),
             pending_session_status_writes: HashMap::new(),
             session_status_flush_scheduled: false,
-            agent_output_probe_at_by_pane: HashMap::new(),
-            agent_output_probe_grace_until_by_pane: HashMap::new(),
+            codex_app_server_channels_by_pane: HashMap::new(),
             last_ui_item: None,
             is_click_to_focus_window: false,
             key_table_state: KeyTableState::default(),
@@ -1735,6 +1740,7 @@ impl TermWindow {
             WindowEvent::Destroyed => {
                 self.window.take();
                 self.event_states.clear();
+                self.stop_all_codex_app_server_channels();
                 // Ensure that we cancel any overlays we had running, so
                 // that the mux can empty out, otherwise the mux keeps
                 // the TermWindow alive via the frontend even though
@@ -2226,8 +2232,7 @@ impl TermWindow {
                             front_end().adjust_unread_bell_count(-1);
                         }
                     }
-                    self.agent_output_probe_at_by_pane.remove(&pane_id);
-                    self.agent_output_probe_grace_until_by_pane.remove(&pane_id);
+                    self.stop_codex_app_server_channel(pane_id);
                 }
                 MuxNotification::PaneAdded(_)
                 | MuxNotification::WorkspaceRenamed { .. }

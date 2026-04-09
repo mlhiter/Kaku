@@ -53,6 +53,7 @@ fastrand.workspace = true
 finl_unicode.workspace = true
 frecency.workspace = true
 futures.workspace = true
+futures-util.workspace = true
 hdrhistogram.workspace = true
 http_req.workspace = true
 image.workspace = true
@@ -82,6 +83,8 @@ termwiz-funcs.workspace = true
 termwiz.workspace = true
 textwrap.workspace = true
 tiny-skia.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+tokio-tungstenite.workspace = true
 umask.workspace = true
 unicode-segmentation.workspace = true
 url-funcs.workspace = true

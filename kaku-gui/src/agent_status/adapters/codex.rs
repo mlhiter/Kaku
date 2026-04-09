@@ -21,11 +21,23 @@ struct PaneRuntimeState {
     last_app_server_signature: Option<String>,
     app_server_turn_active: bool,
     app_server_signal_seen: bool,
+    fallback_last_tail_signature: Option<String>,
 }
 
-#[derive(Default)]
 pub struct CodexAdapter {
     pane_state_by_key: HashMap<String, PaneRuntimeState>,
+    heuristic_enabled: bool,
+}
+
+impl Default for CodexAdapter {
+    fn default() -> Self {
+        Self {
+            pane_state_by_key: HashMap::new(),
+            // Keep historical behavior for unit tests; production wiring can
+            // opt into structured-only mode explicitly.
+            heuristic_enabled: true,
+        }
+    }
 }
 
 impl AgentAdapter for CodexAdapter {
@@ -40,6 +52,9 @@ impl AgentAdapter for CodexAdapter {
         value: &str,
         user_vars: &HashMap<String, String>,
     ) -> Vec<AgentEvent> {
+        if !self.heuristic_enabled {
+            return Vec::new();
+        }
         let state = self.state_mut(pane_key);
         match name {
             "kaku_last_cmd" => Self::observe_last_cmd(state, value),
@@ -56,16 +71,34 @@ impl AgentAdapter for CodexAdapter {
         pane_key: &str,
         sample: &AgentPaneOutputSample,
     ) -> Vec<AgentEvent> {
+        let heuristic_enabled = self.heuristic_enabled;
         let state = self.state_mut(pane_key);
-        if let Some(events) = Self::observe_app_server_notification(state, sample) {
-            if !events.is_empty() {
-                return events;
+        let codex_context = is_codex_context(sample, state.last_command.clone());
+        if !heuristic_enabled {
+            let should_read_structured = codex_context
+                || state.app_server_turn_active
+                || looks_like_app_server_notification_payload(sample.tail_text.as_str());
+            if should_read_structured {
+                if let Some(events) = Self::observe_app_server_notification(state, sample) {
+                    if !events.is_empty() {
+                        return events;
+                    }
+                }
+            }
+            return Vec::new();
+        }
+
+        let should_read_structured =
+            codex_context || state.app_server_turn_active || state.approval_prompt_visible;
+        if should_read_structured {
+            if let Some(events) = Self::observe_app_server_notification(state, sample) {
+                if !events.is_empty() {
+                    return events;
+                }
             }
         }
         if state.app_server_signal_seen {
-            // Keep approval fallback available even after structured transport is seen.
-            // Some app-server versions surface approval only in rendered terminal text.
-            return Self::observe_app_server_approval_fallback(state, sample);
+            return Self::observe_app_server_fallback(state, sample, codex_context);
         }
         Self::observe_approval_prompt(state, sample)
     }
@@ -80,6 +113,13 @@ struct AppServerNotification {
 }
 
 impl CodexAdapter {
+    pub fn structured_only() -> Self {
+        Self {
+            pane_state_by_key: HashMap::new(),
+            heuristic_enabled: false,
+        }
+    }
+
     fn state_mut(&mut self, pane_key: &str) -> &mut PaneRuntimeState {
         self.pane_state_by_key
             .entry(pane_key.to_string())
@@ -185,6 +225,19 @@ impl CodexAdapter {
                         state,
                         Some("waitingOnApproval".to_string()),
                     ));
+                }
+                if is_waiting_on_user_input_status(status) {
+                    state.app_server_turn_active = false;
+                    state.fallback_active = false;
+                    state.fallback_hard_context = false;
+                    state.last_exit_signature = None;
+
+                    let mut events = Vec::new();
+                    if let Some(event) = mark_approval_resolved_if_visible(state, true) {
+                        events.push(event);
+                    }
+                    events.push(task_completed_event());
+                    return Some(events);
                 }
 
                 let mut events = Vec::new();
@@ -310,9 +363,15 @@ impl CodexAdapter {
         let fallback_hard_context = state.fallback_hard_context;
         let approval_detail = extract_approval_prompt(sample.tail_text.as_str());
         let codex_context = is_codex_context(sample, state.last_command.clone());
+        let tail_changed = track_fallback_tail_activity(state, sample.tail_text.as_str());
+        let waiting_input = is_waiting_for_user_input_prompt(sample.tail_text.as_str());
 
-        if approval_detail.is_none() && !was_active && !approval_was_visible && !codex_context {
-            return Vec::new();
+        if approval_detail.is_none() && !was_active && !approval_was_visible {
+            // While idle, don't start a new fallback turn solely because we still have
+            // codex context. Require fresh output and exclude stable input prompts.
+            if !(codex_context && tail_changed && !waiting_input) {
+                return Vec::new();
+            }
         }
 
         let has_explicit_non_codex_context = sample
@@ -348,6 +407,9 @@ impl CodexAdapter {
             state.fallback_active = true;
             state.fallback_hard_context = codex_context;
             events.push(task_started_event());
+            if approval_detail.is_none() {
+                events.push(task_output_event());
+            }
         } else if codex_context {
             state.fallback_hard_context = true;
         }
@@ -360,7 +422,14 @@ impl CodexAdapter {
                 if let Some(event) = mark_approval_resolved_if_visible(state, true) {
                     events.push(event);
                 } else if was_active {
-                    events.push(task_output_event());
+                    if waiting_input {
+                        state.fallback_active = false;
+                        state.fallback_hard_context = false;
+                        state.fallback_last_tail_signature = None;
+                        events.push(task_completed_event());
+                    } else {
+                        events.push(task_output_event());
+                    }
                 }
             }
         }
@@ -380,6 +449,46 @@ impl CodexAdapter {
         }
     }
 
+    fn observe_app_server_fallback(
+        state: &mut PaneRuntimeState,
+        sample: &AgentPaneOutputSample,
+        codex_context: bool,
+    ) -> Vec<AgentEvent> {
+        // Keep approval fallback available even after structured transport is seen.
+        // Some app-server versions surface approval only in rendered terminal text.
+        let mut events = Self::observe_app_server_approval_fallback(state, sample);
+        if !events.is_empty() {
+            return events;
+        }
+
+        if state.app_server_turn_active {
+            if codex_context {
+                // Structured transport can be sparse in some versions. Emit heartbeat
+                // running signals from pane output so we don't get stuck in loading.
+                if !state.fallback_active {
+                    state.fallback_active = true;
+                    return vec![task_output_event()];
+                }
+                events.push(task_output_event());
+                return events;
+            }
+
+            // We lost codex context while turn was considered active.
+            // Treat as completed and release structured mode.
+            state.app_server_turn_active = false;
+            state.app_server_signal_seen = false;
+            state.fallback_active = false;
+            state.fallback_hard_context = false;
+            events.push(task_completed_event());
+            return events;
+        }
+
+        if !codex_context {
+            state.app_server_signal_seen = false;
+        }
+        events
+    }
+
     fn observe_last_cmd(state: &mut PaneRuntimeState, command: &str) -> Vec<AgentEvent> {
         let normalized = command.trim().to_string();
         if normalized.is_empty() {
@@ -393,6 +502,7 @@ impl CodexAdapter {
         state.app_server_signal_seen = false;
         state.fallback_active = false;
         state.fallback_hard_context = false;
+        state.fallback_last_tail_signature = None;
 
         if !is_codex_command(normalized.as_str()) {
             return Vec::new();
@@ -417,6 +527,7 @@ impl CodexAdapter {
             state.fallback_active = false;
             state.app_server_turn_active = false;
             state.fallback_hard_context = false;
+            state.fallback_last_tail_signature = None;
 
             let mut events = Vec::new();
             if let Some(event) = mark_approval_resolved_if_visible(state, true) {
@@ -475,6 +586,7 @@ impl CodexAdapter {
         state.app_server_turn_active = false;
         state.fallback_active = false;
         state.fallback_hard_context = false;
+        state.fallback_last_tail_signature = None;
 
         if exit_code == 0 {
             vec![task_completed_event()]
@@ -554,6 +666,66 @@ fn is_waiting_on_approval_status(status: Option<&Value>) -> bool {
         .get("waitReason")
         .and_then(Value::as_str)
         .is_some_and(|value| value.to_ascii_lowercase().contains("approval"))
+}
+
+fn is_waiting_on_user_input_status(status: Option<&Value>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+
+    let status_type = status
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if status_type.contains("waitingoninput")
+        || status_type.contains("waitingonuserinput")
+        || status_type.contains("waiting_for_input")
+        || status_type.contains("waiting_for_user_input")
+        || status_type.contains("awaitinginput")
+        || status_type.contains("awaitinguserinput")
+        || status_type.contains("userinput")
+    {
+        return true;
+    }
+
+    if status
+        .get("activeFlags")
+        .and_then(Value::as_array)
+        .is_some_and(|flags| {
+            flags.iter().filter_map(Value::as_str).any(|flag| {
+                let flag_lower = flag.to_ascii_lowercase();
+                if flag_lower.contains("approval") {
+                    return false;
+                }
+                flag_lower.contains("waitingoninput")
+                    || flag_lower.contains("waitingonuserinput")
+                    || flag_lower.contains("waiting_for_input")
+                    || flag_lower.contains("waiting_for_user_input")
+                    || flag_lower.contains("awaitinginput")
+                    || flag_lower.contains("awaitinguserinput")
+                    || flag_lower.contains("userinput")
+                    || flag_lower.contains("awaitinguser")
+                    || flag_lower.contains("waitingforuser")
+            })
+        })
+    {
+        return true;
+    }
+
+    status
+        .get("waitReason")
+        .and_then(Value::as_str)
+        .is_some_and(|value| {
+            let lower = value.to_ascii_lowercase();
+            if lower.contains("approval") {
+                return false;
+            }
+            lower.contains("input")
+                || lower.contains("user")
+                || lower.contains("respond")
+                || lower.contains("reply")
+        })
 }
 
 fn task_started_event() -> AgentEvent {
@@ -671,6 +843,64 @@ fn extract_approval_prompt(tail_text: &str) -> Option<String> {
     None
 }
 
+fn track_fallback_tail_activity(state: &mut PaneRuntimeState, tail_text: &str) -> bool {
+    let signature = strip_ansi_control(tail_text)
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+
+    if signature.is_empty() {
+        return false;
+    }
+
+    if state
+        .fallback_last_tail_signature
+        .as_deref()
+        .is_some_and(|previous| previous == signature.as_str())
+    {
+        return false;
+    }
+
+    state.fallback_last_tail_signature = Some(signature);
+    true
+}
+
+fn is_waiting_for_user_input_prompt(tail_text: &str) -> bool {
+    for raw_line in tail_text.lines().rev().take(20) {
+        let stripped = strip_ansi_control(raw_line);
+        let line = stripped.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("press enter to send")
+            || lower.contains("enter to send")
+            || lower.contains("shift+enter")
+            || lower.contains("ctrl+j")
+            || lower.contains("type a message")
+            || lower.contains("ask anything")
+            || line.contains("按回车发送")
+            || line.contains("输入消息")
+        {
+            return true;
+        }
+
+        let trimmed = line.trim_start();
+        if matches!(
+            trimmed.chars().next(),
+            Some('>') | Some('›') | Some('❯') | Some('→') | Some('▌') | Some('█')
+        ) {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn extract_app_server_notification(tail_text: &str) -> Option<AppServerNotification> {
     for raw_line in tail_text.lines().rev().take(24) {
         let stripped = strip_ansi_control(raw_line);
@@ -703,6 +933,20 @@ fn extract_app_server_notification(tail_text: &str) -> Option<AppServerNotificat
         });
     }
     None
+}
+
+fn looks_like_app_server_notification_payload(tail_text: &str) -> bool {
+    let lower = tail_text.to_ascii_lowercase();
+    lower.contains("\"method\":\"turn/")
+        || lower.contains("\"method\": \"turn/")
+        || lower.contains("\"method\":\"thread/")
+        || lower.contains("\"method\": \"thread/")
+        || lower.contains("\"method\":\"item/")
+        || lower.contains("\"method\": \"item/")
+        || lower.contains("\"method\":\"serverrequest/")
+        || lower.contains("\"method\": \"serverrequest/")
+        || lower.contains("\"method\":\"error\"")
+        || lower.contains("\"method\": \"error\"")
 }
 
 fn extract_string_field(params: &Value, keys: &[&str]) -> Option<String> {
@@ -795,10 +1039,12 @@ fn strip_ansi_control(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_app_server_notification, extract_approval_prompt, is_codex_command, CodexAdapter,
+        extract_app_server_notification, extract_approval_prompt, is_codex_command,
+        is_waiting_on_user_input_status, looks_like_app_server_notification_payload, CodexAdapter,
     };
     use crate::agent_status::adapters::{AgentAdapter, AgentPaneOutputSample};
     use crate::agent_status::events::AgentEvent;
+    use serde_json::json;
     use std::collections::HashMap;
 
     fn codex_sample(tail_text: &str) -> AgentPaneOutputSample {
@@ -1092,6 +1338,63 @@ mod tests {
     }
 
     #[test]
+    fn user_input_waiting_status_completes_loading_state() {
+        let mut adapter = CodexAdapter::default();
+        let _ = adapter.observe_user_var("1", "kaku_last_cmd", "codex", &HashMap::new());
+
+        let _ = adapter.observe_pane_output(
+            "1",
+            &codex_sample(
+                r#"{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"x","status":"inProgress","items":[],"error":null}}}"#,
+            ),
+        );
+
+        let done = adapter.observe_pane_output(
+            "1",
+            &codex_sample(
+                r#"{"method":"thread/status/changed","params":{"threadId":"t1","status":{"type":"active","activeFlags":["waitingOnInput"]}}}"#,
+            ),
+        );
+        assert_eq!(
+            done,
+            vec![AgentEvent::TaskCompleted {
+                provider: "codex".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn detects_user_input_waiting_without_confusing_approval() {
+        assert!(is_waiting_on_user_input_status(Some(&json!({
+            "type": "active",
+            "activeFlags": ["waitingOnInput"]
+        }))));
+        assert!(is_waiting_on_user_input_status(Some(&json!({
+            "type": "active",
+            "waitReason": "waiting for user input"
+        }))));
+        assert!(!is_waiting_on_user_input_status(Some(&json!({
+            "type": "active",
+            "activeFlags": ["waitingOnApproval"]
+        }))));
+        assert!(is_waiting_on_user_input_status(Some(&json!({
+            "type": "active",
+            "activeFlags": ["waitingOnUserInput"]
+        }))));
+    }
+
+    #[test]
+    fn detects_app_server_json_payload_in_tail_text() {
+        assert!(looks_like_app_server_notification_payload(
+            r#"{"method":"turn/started","params":{"turn":{"id":"x"}}}"#
+        ));
+        assert!(looks_like_app_server_notification_payload(
+            r#"noise {"method":"thread/status/changed","params":{"status":{"type":"active"}}}"#
+        ));
+        assert!(!looks_like_app_server_notification_payload("plain terminal output"));
+    }
+
+    #[test]
     fn emits_approval_events_from_app_server_request_methods() {
         let mut adapter = CodexAdapter::default();
         let _ = adapter.observe_user_var("1", "kaku_last_cmd", "codex", &HashMap::new());
@@ -1124,7 +1427,12 @@ mod tests {
         let first = adapter.observe_pane_output("1", &codex_sample(payload));
         let second = adapter.observe_pane_output("1", &codex_sample(payload));
         assert!(!first.is_empty());
-        assert!(second.is_empty());
+        assert_eq!(
+            second,
+            vec![AgentEvent::TaskOutput {
+                provider: "codex".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -1172,9 +1480,14 @@ Approve command execution? [y/N]"#;
         let running = adapter.observe_pane_output("1", &codex_sample("thinking..."));
         assert_eq!(
             running,
-            vec![AgentEvent::TaskStarted {
-                provider: "codex".to_string(),
-            }]
+            vec![
+                AgentEvent::TaskStarted {
+                    provider: "codex".to_string(),
+                },
+                AgentEvent::TaskOutput {
+                    provider: "codex".to_string(),
+                }
+            ]
         );
 
         let mut vars = HashMap::new();
@@ -1200,6 +1513,23 @@ Approve command execution? [y/N]"#;
         );
 
         let events = adapter.observe_pane_output("1", &codex_sample("still working..."));
+        assert_eq!(
+            events,
+            vec![AgentEvent::TaskOutput {
+                provider: "codex".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn ignores_structured_notification_outside_codex_context() {
+        let mut adapter = CodexAdapter::default();
+        let events = adapter.observe_pane_output(
+            "1",
+            &non_codex_sample(
+                r#"{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"x","status":"inProgress","items":[],"error":null}}}"#,
+            ),
+        );
         assert!(events.is_empty());
     }
 
@@ -1335,6 +1665,45 @@ Approve command execution? [y/N]"#;
             vec![AgentEvent::TaskOutput {
                 provider: "codex".to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn waiting_input_prompt_does_not_retrigger_started_while_idle() {
+        let mut adapter = CodexAdapter::default();
+        let _ = adapter.observe_user_var("1", "kaku_last_cmd", "codex", &HashMap::new());
+
+        let _ = adapter.observe_pane_output("1", &codex_sample("processing..."));
+        let done = adapter.observe_pane_output("1", &codex_sample(">"));
+        assert_eq!(
+            done,
+            vec![AgentEvent::TaskCompleted {
+                provider: "codex".to_string(),
+            }]
+        );
+
+        let idle_probe = adapter.observe_pane_output("1", &codex_sample(">"));
+        assert!(idle_probe.is_empty());
+    }
+
+    #[test]
+    fn idle_restarts_only_on_new_output_after_waiting_input() {
+        let mut adapter = CodexAdapter::default();
+        let _ = adapter.observe_user_var("1", "kaku_last_cmd", "codex", &HashMap::new());
+        let _ = adapter.observe_pane_output("1", &codex_sample("processing..."));
+        let _ = adapter.observe_pane_output("1", &codex_sample(">"));
+
+        let restarted = adapter.observe_pane_output("1", &codex_sample("new task output"));
+        assert_eq!(
+            restarted,
+            vec![
+                AgentEvent::TaskStarted {
+                    provider: "codex".to_string(),
+                },
+                AgentEvent::TaskOutput {
+                    provider: "codex".to_string(),
+                }
+            ]
         );
     }
 }
