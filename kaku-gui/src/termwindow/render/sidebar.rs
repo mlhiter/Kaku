@@ -438,6 +438,7 @@ struct SidebarEnvDisplayEntry {
     key: String,
     value: String,
     is_global: bool,
+    source_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -1803,7 +1804,7 @@ impl crate::TermWindow {
 
             lines.push(
                 SidebarLine::action(
-                    "  Env (plaintext)",
+                    "  Env (file-based)",
                     SidebarAction::OpenEnvSectionContextMenu {
                         project_id: project_id.clone(),
                     },
@@ -1816,6 +1817,42 @@ impl crate::TermWindow {
                     },
                 ),
             );
+            match self.sidebar_discover_project_env_files(project_id.as_str()) {
+                Ok(project_env_files) => {
+                    if project_env_files.is_empty() {
+                        lines.push(
+                            SidebarLine::new("    project files: (none)", false)
+                                .with_tone(SidebarLineTone::Muted),
+                        );
+                    } else {
+                        for path in project_env_files.iter().take(3) {
+                            let label = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or(".env");
+                            lines.push(
+                                SidebarLine::new(format!("    file: {label}"), false)
+                                    .with_tone(SidebarLineTone::Muted),
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    lines.push(
+                        SidebarLine::new(
+                            format!(
+                                "    env file scan error: {}",
+                                truncate_middle(
+                                    format!("{err:#}").as_str(),
+                                    line_char_budget.saturating_sub(8)
+                                )
+                            ),
+                            false,
+                        )
+                        .with_tone(SidebarLineTone::Warning),
+                    );
+                }
+            }
             match self.sidebar_load_env_entries(project_id.as_str()) {
                 Ok(entries) => {
                     if entries.is_empty() {
@@ -1827,6 +1864,11 @@ impl crate::TermWindow {
                             let scope_tag = if entry.is_global { "G" } else { "P" };
                             let key_budget = line_char_budget.saturating_sub(16).max(12);
                             let value_budget = line_char_budget.saturating_sub(20).max(12);
+                            let source_name = entry
+                                .source_path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("env");
                             lines.push(
                                 SidebarLine::action(
                                     format!(
@@ -1853,6 +1895,16 @@ impl crate::TermWindow {
                                     format!(
                                         "      = {}",
                                         truncate_middle(entry.value.as_str(), value_budget)
+                                    ),
+                                    false,
+                                )
+                                .with_tone(SidebarLineTone::Muted),
+                            );
+                            lines.push(
+                                SidebarLine::new(
+                                    format!(
+                                        "      @ {}",
+                                        truncate_middle(source_name, value_budget)
                                     ),
                                     false,
                                 )
@@ -2281,70 +2333,172 @@ read -r _
         &self,
         project_id: &str,
     ) -> anyhow::Result<Vec<SidebarEnvDisplayEntry>> {
+        self.sidebar_maybe_migrate_legacy_env_files(project_id)?;
+
         let mut entries = Vec::new();
-        let global_env_path = sidebar_global_env_path();
-        let project_env_path = sidebar_project_env_path(project_id);
+        for path in self.sidebar_discover_project_env_files(project_id)? {
+            entries.extend(self.sidebar_load_env_entries_from_file(&path, false)?);
+        }
 
-        let mut global_file: EnvVarsFile = read_json_file_or_default(&global_env_path)?;
-        global_file
-            .env
-            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        entries.extend(
-            global_file
-                .env
-                .into_iter()
-                .map(|entry| SidebarEnvDisplayEntry {
-                    id: entry.id,
-                    key: entry.key,
-                    value: entry.value,
-                    is_global: true,
-                }),
-        );
+        let global_env_file = sidebar_global_env_file_path();
+        if global_env_file.exists() {
+            entries.extend(self.sidebar_load_env_entries_from_file(&global_env_file, true)?);
+        }
 
-        let mut project_file: EnvVarsFile = read_json_file_or_default(&project_env_path)?;
-        project_file
-            .env
-            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        entries.extend(
-            project_file
-                .env
-                .into_iter()
-                .map(|entry| SidebarEnvDisplayEntry {
-                    id: entry.id,
-                    key: entry.key,
-                    value: entry.value,
-                    is_global: false,
-                }),
-        );
         Ok(entries)
     }
 
-    fn sidebar_load_env_file(
+    fn sidebar_maybe_migrate_legacy_env_files(&self, project_id: &str) -> anyhow::Result<()> {
+        let legacy_global_path = sidebar_global_env_path();
+        if legacy_global_path.exists() {
+            let mut legacy_global: EnvVarsFile = read_json_file_or_default(&legacy_global_path)?;
+            if !legacy_global.env.is_empty() {
+                let target = sidebar_global_env_file_path();
+                append_env_entries_to_file(&target, &legacy_global.env)?;
+                legacy_global.env.clear();
+                write_json_file_atomic(&legacy_global_path, &legacy_global)?;
+            }
+        }
+
+        let legacy_project_path = sidebar_project_env_path(project_id);
+        if legacy_project_path.exists() {
+            let mut legacy_project: EnvVarsFile = read_json_file_or_default(&legacy_project_path)?;
+            if !legacy_project.env.is_empty() {
+                let target = sidebar_project_managed_env_file_path(project_id);
+                append_env_entries_to_file(&target, &legacy_project.env)?;
+                legacy_project.env.clear();
+                write_json_file_atomic(&legacy_project_path, &legacy_project)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn sidebar_discover_project_env_files(&self, project_id: &str) -> anyhow::Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        let mut seen = HashSet::new();
+        let Some(project_root) = self.sidebar_project_root_path(project_id) else {
+            return Ok(files);
+        };
+
+        let known = [
+            ".env",
+            ".env.local",
+            ".env.development",
+            ".env.production",
+            ".env.test",
+        ];
+        for name in known {
+            let path = project_root.join(name);
+            if path.is_file() && seen.insert(path.clone()) {
+                files.push(path);
+            }
+        }
+
+        let mut extras = Vec::new();
+        for entry in std::fs::read_dir(&project_root)
+            .with_context(|| format!("read {}", project_root.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if !name.starts_with(".env.") {
+                continue;
+            }
+            if seen.insert(path.clone()) {
+                extras.push(path);
+            }
+        }
+        extras.sort();
+        files.extend(extras);
+
+        let managed_path = sidebar_project_managed_env_file_path(project_id);
+        if managed_path.is_file() && seen.insert(managed_path.clone()) {
+            files.push(managed_path);
+        }
+
+        Ok(files)
+    }
+
+    fn sidebar_load_env_entries_from_file(
+        &self,
+        path: &Path,
+        is_global: bool,
+    ) -> anyhow::Result<Vec<SidebarEnvDisplayEntry>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let mut entries = Vec::new();
+        for (line_idx, raw_line) in content.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let assignment = line
+                .strip_prefix("export ")
+                .map(str::trim_start)
+                .unwrap_or(line);
+            let Some((key, value)) = assignment.split_once('=') else {
+                continue;
+            };
+            let key = key.trim();
+            if !is_valid_env_key(key) {
+                continue;
+            }
+
+            entries.push(SidebarEnvDisplayEntry {
+                id: encode_env_entry_id(path, key, line_idx),
+                key: key.to_string(),
+                value: value.trim().to_string(),
+                is_global,
+                source_path: path.to_path_buf(),
+            });
+        }
+
+        Ok(entries)
+    }
+
+    fn sidebar_env_entry(
         &self,
         project_id: &str,
-        is_global: bool,
-    ) -> anyhow::Result<(PathBuf, EnvVarsFile)> {
-        let path = if is_global {
-            sidebar_global_env_path()
-        } else {
-            sidebar_project_env_path(project_id)
-        };
-        let file: EnvVarsFile = read_json_file_or_default(&path)?;
-        Ok((path, file))
+        env_id: &str,
+    ) -> anyhow::Result<SidebarEnvDisplayEntry> {
+        self.sidebar_load_env_entries(project_id)?
+            .into_iter()
+            .find(|entry| entry.id == env_id)
+            .ok_or_else(|| anyhow!("env var not found: {project_id}/{env_id}"))
+    }
+
+    fn sidebar_primary_project_env_file_path(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<PathBuf> {
+        let discovered = self.sidebar_discover_project_env_files(project_id)?;
+        if let Some(path) = discovered.into_iter().next() {
+            return Ok(path);
+        }
+        if let Some(project_root) = self.sidebar_project_root_path(project_id) {
+            return Ok(project_root.join(".env"));
+        }
+        Ok(sidebar_project_managed_env_file_path(project_id))
     }
 
     fn sidebar_env_assignment(
         &self,
         project_id: &str,
         env_id: &str,
-        is_global: bool,
+        _is_global: bool,
     ) -> anyhow::Result<String> {
-        let (_, file) = self.sidebar_load_env_file(project_id, is_global)?;
-        let entry = file
-            .env
-            .into_iter()
-            .find(|entry| entry.id == env_id)
-            .ok_or_else(|| anyhow!("env var not found: {project_id}/{env_id}"))?;
+        let entry = self.sidebar_env_entry(project_id, env_id)?;
         Ok(format!("{}={}", entry.key, entry.value))
     }
 
@@ -2353,59 +2507,29 @@ read -r _
         project_id: &str,
         is_global: bool,
     ) -> anyhow::Result<()> {
-        let row_height = self
-            .render_metrics
-            .cell_size
-            .height
-            .max(1)
-            .saturating_add(12) as usize;
-        let anchor = UIItem {
-            x: 12,
-            y: 32,
-            width: self
-                .sidebar_reserved_width_px()
-                .saturating_sub(24)
-                .clamp(260, 560),
-            height: row_height,
-            item_type: UIItemType::SidebarPanel,
+        let path = if is_global {
+            sidebar_global_env_file_path()
+        } else {
+            self.sidebar_primary_project_env_file_path(project_id)?
         };
-        let modal = crate::termwindow::tab_rename::TabRenameModal::new_create_env_var(
-            self,
-            project_id.to_string(),
-            is_global,
-            anchor,
+        let project_root = self.sidebar_project_root_path(project_id);
+        let cwd = if is_global {
+            Some(config::HOME_DIR.as_path())
+        } else {
+            project_root
+                .as_deref()
+                .or(Some(config::HOME_DIR.as_path()))
+        };
+        self.sidebar_open_file_in_editor_tab(
+            &path,
+            cwd,
+            if is_global {
+                "Edit Env File (Global)"
+            } else {
+                "Edit Env File (Project)"
+            },
         )?;
-        self.set_modal(Rc::new(modal));
-        Ok(())
-    }
-
-    pub(crate) fn sidebar_create_env_var_from_modal(
-        &mut self,
-        project_id: &str,
-        is_global: bool,
-        assignment: &str,
-    ) -> anyhow::Result<()> {
-        let (key, value) = parse_env_assignment(assignment)?;
-        let (path, mut file) = self.sidebar_load_env_file(project_id, is_global)?;
-
-        if file.env.iter().any(|entry| entry.key == key) {
-            self.show_toast(format!("Env key \"{key}\" already exists."));
-            return Ok(());
-        }
-
-        file.env.push(EnvVarEntry {
-            id: generate_sidebar_id("env"),
-            key: key.clone(),
-            value,
-            updated_at: Utc::now().to_rfc3339(),
-        });
-        write_json_file_atomic(&path, &file)?;
-        self.force_workspace_sidebar_refresh();
-        self.show_toast(format!(
-            "Added {} env \"{}\".",
-            if is_global { "global" } else { "project" },
-            key
-        ));
+        self.show_toast("Env file opened in editor tab".to_string());
         Ok(())
     }
 
@@ -2415,65 +2539,17 @@ read -r _
         env_id: &str,
         is_global: bool,
     ) -> anyhow::Result<()> {
-        let initial_assignment = self.sidebar_env_assignment(project_id, env_id, is_global)?;
-        let row_height = self
-            .render_metrics
-            .cell_size
-            .height
-            .max(1)
-            .saturating_add(12) as usize;
-        let anchor = UIItem {
-            x: 12,
-            y: 32,
-            width: self
-                .sidebar_reserved_width_px()
-                .saturating_sub(24)
-                .clamp(260, 560),
-            height: row_height,
-            item_type: UIItemType::SidebarPanel,
+        let entry = self.sidebar_env_entry(project_id, env_id)?;
+        let project_root = self.sidebar_project_root_path(project_id);
+        let cwd = if is_global {
+            Some(config::HOME_DIR.as_path())
+        } else {
+            project_root
+                .as_deref()
+                .or(Some(config::HOME_DIR.as_path()))
         };
-        let modal = crate::termwindow::tab_rename::TabRenameModal::new_edit_env_var(
-            self,
-            project_id.to_string(),
-            env_id.to_string(),
-            is_global,
-            initial_assignment,
-            anchor,
-        )?;
-        self.set_modal(Rc::new(modal));
-        Ok(())
-    }
-
-    pub(crate) fn sidebar_edit_env_var_from_modal(
-        &mut self,
-        project_id: &str,
-        env_id: &str,
-        is_global: bool,
-        assignment: &str,
-    ) -> anyhow::Result<()> {
-        let (key, value) = parse_env_assignment(assignment)?;
-        let (path, mut file) = self.sidebar_load_env_file(project_id, is_global)?;
-
-        if file
-            .env
-            .iter()
-            .any(|entry| entry.id != env_id && entry.key == key)
-        {
-            self.show_toast(format!("Env key \"{key}\" already exists."));
-            return Ok(());
-        }
-
-        let entry = file
-            .env
-            .iter_mut()
-            .find(|entry| entry.id == env_id)
-            .ok_or_else(|| anyhow!("env var not found in storage: {env_id}"))?;
-        entry.key = key.clone();
-        entry.value = value;
-        entry.updated_at = Utc::now().to_rfc3339();
-        write_json_file_atomic(&path, &file)?;
-        self.force_workspace_sidebar_refresh();
-        self.show_toast(format!("Updated env \"{key}\"."));
+        self.sidebar_open_file_in_editor_tab(&entry.source_path, cwd, "Edit Env File")?;
+        self.show_toast("Env file opened in editor tab".to_string());
         Ok(())
     }
 
@@ -2501,18 +2577,16 @@ read -r _
         &mut self,
         project_id: &str,
         env_id: &str,
-        is_global: bool,
+        _is_global: bool,
     ) -> anyhow::Result<()> {
-        let (path, mut file) = self.sidebar_load_env_file(project_id, is_global)?;
-        let idx = file
-            .env
-            .iter()
-            .position(|entry| entry.id == env_id)
-            .ok_or_else(|| anyhow!("env var not found in storage: {env_id}"))?;
-        let removed = file.env.remove(idx);
-        write_json_file_atomic(&path, &file)?;
+        let entry = self.sidebar_env_entry(project_id, env_id)?;
+        let removed = remove_env_key_from_file(&entry.source_path, entry.key.as_str())?;
+        if !removed {
+            self.show_toast(format!("Env key \"{}\" not found in file", entry.key));
+            return Ok(());
+        }
         self.force_workspace_sidebar_refresh();
-        self.show_toast(format!("Deleted env \"{}\".", removed.key));
+        self.show_toast(format!("Deleted env \"{}\".", entry.key));
         Ok(())
     }
 
@@ -3422,18 +3496,10 @@ read -r _
                 },
             ),
             SidebarContextMenuItem::new(
-                "Edit Env",
+                "Open Env File",
                 SidebarAction::EditEnvVar {
                     project_id: project_id.clone(),
                     env_id: env_id.clone(),
-                    is_global,
-                },
-            ),
-            SidebarContextMenuItem::danger(
-                "Delete Env",
-                SidebarAction::DeleteEnvVar {
-                    project_id,
-                    env_id,
                     is_global,
                 },
             ),
@@ -4080,6 +4146,16 @@ fn sidebar_global_env_path() -> PathBuf {
     sidebar_global_resources_root().join("env.json")
 }
 
+fn sidebar_global_env_file_path() -> PathBuf {
+    sidebar_global_resources_root().join("env").join("global.env")
+}
+
+fn sidebar_project_managed_env_file_path(project_id: &str) -> PathBuf {
+    sidebar_project_resources_root(project_id)
+        .join("env")
+        .join("project.env")
+}
+
 fn sidebar_project_background_path(project_id: &str) -> PathBuf {
     sidebar_state_root()
         .join("projects")
@@ -4130,6 +4206,92 @@ fn shell_quote(value: &str) -> String {
     shlex::try_quote(value)
         .map(|quoted| quoted.into_owned())
         .unwrap_or_else(|_| format!("'{}'", value.replace('\'', "'\"'\"'")))
+}
+
+fn encode_env_entry_id(path: &Path, key: &str, line_idx: usize) -> String {
+    format!(
+        "{}{}{}{}{}",
+        path.to_string_lossy(),
+        '\u{1f}',
+        key,
+        '\u{1f}',
+        line_idx
+    )
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn append_env_entries_to_file(path: &Path, entries: &[EnvVarEntry]) -> anyhow::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+
+    let mut existing = if path.exists() {
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
+    } else {
+        String::new()
+    };
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    for entry in entries {
+        if !is_valid_env_key(entry.key.as_str()) {
+            continue;
+        }
+        existing.push_str(entry.key.as_str());
+        existing.push('=');
+        existing.push_str(entry.value.as_str());
+        existing.push('\n');
+    }
+
+    std::fs::write(path, existing).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+fn remove_env_key_from_file(path: &Path, key: &str) -> anyhow::Result<bool> {
+    let content = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let had_trailing_newline = content.ends_with('\n');
+    let mut removed = false;
+    let mut kept_lines: Vec<&str> = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        let assignment = trimmed
+            .strip_prefix("export ")
+            .map(str::trim_start)
+            .unwrap_or(trimmed);
+        let should_remove = assignment
+            .split_once('=')
+            .map(|(lhs, _)| lhs.trim() == key)
+            .unwrap_or(false);
+        if should_remove && !removed {
+            removed = true;
+            continue;
+        }
+        kept_lines.push(line);
+    }
+
+    if !removed {
+        return Ok(false);
+    }
+
+    let mut rewritten = kept_lines.join("\n");
+    if had_trailing_newline {
+        rewritten.push('\n');
+    }
+    std::fs::write(path, rewritten).with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
 }
 
 fn parse_env_assignment(raw: &str) -> anyhow::Result<(String, String)> {

@@ -39,15 +39,6 @@ enum RenameTarget {
         session_id: String,
     },
     CreateProject,
-    CreateEnvVar {
-        project_id: String,
-        is_global: bool,
-    },
-    EditEnvVar {
-        project_id: String,
-        env_id: String,
-        is_global: bool,
-    },
     SetBackgroundImage {
         project_id: String,
     },
@@ -178,56 +169,6 @@ impl TabRenameModal {
             style_tab_id,
             anchor,
             value: RefCell::new(value),
-            cursor: RefCell::new(cursor),
-            selection: RefCell::new(None),
-        };
-        modal.reconfigure(term_window);
-        Ok(modal)
-    }
-
-    pub fn new_create_env_var(
-        term_window: &mut TermWindow,
-        project_id: String,
-        is_global: bool,
-        anchor: UIItem,
-    ) -> anyhow::Result<Self> {
-        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for prompt")?;
-        let modal = Self {
-            element: RefCell::new(None),
-            target: RenameTarget::CreateEnvVar {
-                project_id,
-                is_global,
-            },
-            style_tab_id,
-            anchor,
-            value: RefCell::new(String::new()),
-            cursor: RefCell::new(0),
-            selection: RefCell::new(None),
-        };
-        modal.reconfigure(term_window);
-        Ok(modal)
-    }
-
-    pub fn new_edit_env_var(
-        term_window: &mut TermWindow,
-        project_id: String,
-        env_id: String,
-        is_global: bool,
-        initial_assignment: String,
-        anchor: UIItem,
-    ) -> anyhow::Result<Self> {
-        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for prompt")?;
-        let cursor = initial_assignment.chars().count();
-        let modal = Self {
-            element: RefCell::new(None),
-            target: RenameTarget::EditEnvVar {
-                project_id,
-                env_id,
-                is_global,
-            },
-            style_tab_id,
-            anchor,
-            value: RefCell::new(initial_assignment),
             cursor: RefCell::new(cursor),
             selection: RefCell::new(None),
         };
@@ -549,34 +490,6 @@ impl TabRenameModal {
                 if let Err(err) = term_window.sidebar_create_project_from_modal(value.as_str()) {
                     log::warn!("create project from modal failed: {:#}", err);
                     term_window.show_toast("Failed to create project".to_string());
-                }
-            }
-            RenameTarget::CreateEnvVar {
-                project_id,
-                is_global,
-            } => {
-                if let Err(err) = term_window.sidebar_create_env_var_from_modal(
-                    project_id.as_str(),
-                    *is_global,
-                    value.as_str(),
-                ) {
-                    log::warn!("create env from modal failed: {:#}", err);
-                    term_window.show_toast("Failed to create env var".to_string());
-                }
-            }
-            RenameTarget::EditEnvVar {
-                project_id,
-                env_id,
-                is_global,
-            } => {
-                if let Err(err) = term_window.sidebar_edit_env_var_from_modal(
-                    project_id.as_str(),
-                    env_id.as_str(),
-                    *is_global,
-                    value.as_str(),
-                ) {
-                    log::warn!("edit env from modal failed: {:#}", err);
-                    term_window.show_toast("Failed to update env var".to_string());
                 }
             }
             RenameTarget::SetBackgroundImage { project_id } => {
