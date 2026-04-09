@@ -609,6 +609,7 @@ pub enum SidebarAction {
     CreateSnippet {
         project_id: String,
     },
+    CreateGlobalSnippet,
     InsertSnippet {
         project_id: String,
         snippet_id: String,

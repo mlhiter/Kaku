@@ -425,6 +425,14 @@ struct SidebarSessionMeta {
 }
 
 #[derive(Debug, Clone)]
+struct SidebarSnippetDisplayEntry {
+    id: String,
+    name: String,
+    path: PathBuf,
+    is_global: bool,
+}
+
+#[derive(Debug, Clone)]
 struct SidebarEnvDisplayEntry {
     id: String,
     key: String,
@@ -640,6 +648,7 @@ impl crate::TermWindow {
             SidebarAction::CreateSnippet { project_id } => {
                 self.sidebar_request_create_snippet(project_id.as_str())
             }
+            SidebarAction::CreateGlobalSnippet => self.sidebar_request_create_global_snippet(),
             SidebarAction::InsertSnippet {
                 project_id,
                 snippet_id,
@@ -1689,6 +1698,11 @@ impl crate::TermWindow {
             let project_label = self.sidebar_project_display_name(project_id.as_str());
             lines.push(
                 SidebarLine::new(format!("Resources ({project_label})"), true)
+                    .with_tone(SidebarLineTone::Info),
+            );
+
+            lines.push(
+                SidebarLine::new("  Snippets", false)
                     .with_tone(SidebarLineTone::Info)
                     .with_trailing_button(
                         "+",
@@ -1697,26 +1711,63 @@ impl crate::TermWindow {
                         },
                     ),
             );
-
-            match self.sidebar_load_project_snippets(project_id.as_str()) {
-                Ok(snippets) => {
-                    if snippets.is_empty() {
+            let project_snippets = self.sidebar_load_project_snippet_files(project_id.as_str());
+            let global_snippets = self.sidebar_load_global_snippet_files();
+            match (project_snippets, global_snippets) {
+                (Ok(project_snippets), Ok(global_snippets)) => {
+                    lines.push(
+                        SidebarLine::new("    Project Files", false)
+                            .with_tone(SidebarLineTone::Muted),
+                    );
+                    if project_snippets.is_empty() {
                         lines.push(
-                            SidebarLine::new("  Snippets: (none)", false)
+                            SidebarLine::new("      (none)", false)
                                 .with_tone(SidebarLineTone::Muted),
                         );
                     } else {
-                        lines.push(
-                            SidebarLine::new("  Snippets", false).with_tone(SidebarLineTone::Info),
-                        );
-                        for snippet in snippets.iter().take(8) {
+                        for snippet in project_snippets.iter().take(8) {
                             let snippet_name = truncate_middle(
                                 snippet.name.as_str(),
-                                line_char_budget.saturating_sub(8),
+                                line_char_budget.saturating_sub(10).max(12),
                             );
                             lines.push(
                                 SidebarLine::action(
-                                    format!("    > {snippet_name}"),
+                                    format!("      > {snippet_name}"),
+                                    SidebarAction::InsertSnippet {
+                                        project_id: project_id.clone(),
+                                        snippet_id: snippet.id.clone(),
+                                    },
+                                )
+                                .with_trailing_button(
+                                    "⋯",
+                                    SidebarAction::OpenSnippetContextMenu {
+                                        project_id: project_id.clone(),
+                                        snippet_id: snippet.id.clone(),
+                                    },
+                                ),
+                            );
+                        }
+                    }
+
+                    lines.push(
+                        SidebarLine::new("    Global Files", false)
+                            .with_tone(SidebarLineTone::Muted)
+                            .with_trailing_button("+", SidebarAction::CreateGlobalSnippet),
+                    );
+                    if global_snippets.is_empty() {
+                        lines.push(
+                            SidebarLine::new("      (none)", false)
+                                .with_tone(SidebarLineTone::Muted),
+                        );
+                    } else {
+                        for snippet in global_snippets.iter().take(8) {
+                            let snippet_name = truncate_middle(
+                                snippet.name.as_str(),
+                                line_char_budget.saturating_sub(10).max(12),
+                            );
+                            lines.push(
+                                SidebarLine::action(
+                                    format!("      > {snippet_name}"),
                                     SidebarAction::InsertSnippet {
                                         project_id: project_id.clone(),
                                         snippet_id: snippet.id.clone(),
@@ -1733,11 +1784,11 @@ impl crate::TermWindow {
                         }
                     }
                 }
-                Err(err) => {
+                (Err(err), _) | (_, Err(err)) => {
                     lines.push(
                         SidebarLine::new(
                             format!(
-                                "  Snippets load error: {}",
+                                "    snippets load error: {}",
                                 truncate_middle(
                                     format!("{err:#}").as_str(),
                                     line_char_budget.saturating_sub(8)
@@ -1983,81 +2034,199 @@ impl crate::TermWindow {
         Ok(())
     }
 
-    fn sidebar_load_project_snippets(&self, project_id: &str) -> anyhow::Result<Vec<SnippetEntry>> {
-        let snippets_path = sidebar_project_snippets_path(project_id);
-        let mut snippets_file: SnippetsFile = read_json_file_or_default(&snippets_path)?;
-        snippets_file
-            .snippets
-            .retain(|snippet| !snippet.id.trim().is_empty());
-        snippets_file
-            .snippets
-            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        Ok(snippets_file.snippets)
-    }
-
-    fn sidebar_snippet_content(
+    fn sidebar_load_project_snippet_files(
         &self,
         project_id: &str,
-        snippet_id: &str,
-    ) -> anyhow::Result<String> {
-        let snippets = self.sidebar_load_project_snippets(project_id)?;
-        let snippet = snippets
-            .into_iter()
-            .find(|snippet| snippet.id == snippet_id)
-            .ok_or_else(|| anyhow!("snippet not found: {project_id}/{snippet_id}"))?;
-        Ok(snippet.content)
+    ) -> anyhow::Result<Vec<SidebarSnippetDisplayEntry>> {
+        self.sidebar_maybe_migrate_legacy_project_snippets(project_id)?;
+        self.sidebar_load_snippet_files_from_dir(&sidebar_project_snippets_dir(project_id), false)
     }
 
-    fn sidebar_request_create_snippet(&mut self, project_id: &str) -> anyhow::Result<()> {
-        let row_height = self
-            .render_metrics
-            .cell_size
-            .height
-            .max(1)
-            .saturating_add(12) as usize;
-        let anchor = UIItem {
-            x: 12,
-            y: 32,
-            width: self
-                .sidebar_reserved_width_px()
-                .saturating_sub(24)
-                .clamp(260, 560),
-            height: row_height,
-            item_type: UIItemType::SidebarPanel,
-        };
-        let modal = crate::termwindow::tab_rename::TabRenameModal::new_create_snippet(
-            self,
-            project_id.to_string(),
-            anchor,
-        )?;
-        self.set_modal(Rc::new(modal));
-        Ok(())
+    fn sidebar_load_global_snippet_files(&self) -> anyhow::Result<Vec<SidebarSnippetDisplayEntry>> {
+        self.sidebar_load_snippet_files_from_dir(&sidebar_global_snippets_dir(), true)
     }
 
-    pub(crate) fn sidebar_create_snippet_from_modal(
-        &mut self,
-        project_id: &str,
-        content: &str,
-    ) -> anyhow::Result<()> {
-        let content = content.trim();
-        if content.is_empty() {
-            self.show_toast("Snippet cannot be empty".to_string());
+    fn sidebar_maybe_migrate_legacy_project_snippets(&self, project_id: &str) -> anyhow::Result<()> {
+        let legacy_path = sidebar_project_snippets_path(project_id);
+        if !legacy_path.exists() {
             return Ok(());
         }
 
-        let snippets_path = sidebar_project_snippets_path(project_id);
-        let mut snippets_file: SnippetsFile = read_json_file_or_default(&snippets_path)?;
-        let now = Utc::now().to_rfc3339();
-        let name = derive_snippet_name(content);
-        snippets_file.snippets.push(SnippetEntry {
-            id: generate_sidebar_id("snip"),
-            name: name.clone(),
-            content: content.to_string(),
-            updated_at: now,
-        });
-        write_json_file_atomic(&snippets_path, &snippets_file)?;
+        let mut legacy: SnippetsFile = read_json_file_or_default(&legacy_path)?;
+        if legacy.snippets.is_empty() {
+            return Ok(());
+        }
+
+        let dir = sidebar_project_snippets_dir(project_id);
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        for snippet in &legacy.snippets {
+            let content = snippet.content.trim();
+            if content.is_empty() {
+                continue;
+            }
+
+            let stem_seed = if snippet.name.trim().is_empty() {
+                derive_snippet_name(content)
+            } else {
+                snippet.name.trim().to_string()
+            };
+            let stem = sanitize_snippet_filename(stem_seed.as_str());
+            let mut path = dir.join(format!("{stem}.txt"));
+            let mut suffix = 2usize;
+            while path.exists() {
+                path = dir.join(format!("{stem}-{suffix}.txt"));
+                suffix = suffix.saturating_add(1);
+            }
+            std::fs::write(&path, content)
+                .with_context(|| format!("write migrated snippet {}", path.display()))?;
+        }
+
+        legacy.snippets.clear();
+        write_json_file_atomic(&legacy_path, &legacy)?;
+        Ok(())
+    }
+
+    fn sidebar_load_snippet_files_from_dir(
+        &self,
+        dir: &Path,
+        is_global: bool,
+    ) -> anyhow::Result<Vec<SidebarSnippetDisplayEntry>> {
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut items: Vec<(SidebarSnippetDisplayEntry, SystemTime)> = Vec::new();
+        for entry in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+            let entry = entry.with_context(|| format!("read entry in {}", dir.display()))?;
+            let path = entry.path();
+            let metadata = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            let display_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("snippet")
+                .to_string();
+            items.push((
+                SidebarSnippetDisplayEntry {
+                    id: path.to_string_lossy().into_owned(),
+                    name: display_name,
+                    path,
+                    is_global,
+                },
+                modified,
+            ));
+        }
+
+        items.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(items.into_iter().map(|(entry, _)| entry).collect())
+    }
+
+    fn sidebar_snippet_entry(
+        &self,
+        project_id: &str,
+        snippet_id: &str,
+    ) -> anyhow::Result<SidebarSnippetDisplayEntry> {
+        let mut combined = self.sidebar_load_project_snippet_files(project_id)?;
+        combined.extend(self.sidebar_load_global_snippet_files()?);
+        combined
+            .into_iter()
+            .find(|snippet| snippet.id == snippet_id)
+            .ok_or_else(|| anyhow!("snippet file not found: {snippet_id}"))
+    }
+
+    fn sidebar_project_root_path(&self, project_id: &str) -> Option<PathBuf> {
+        self.workspace_sidebar
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .map(|project| PathBuf::from(project.root_path.as_str()))
+    }
+
+    fn sidebar_new_snippet_file_path(&self, dir: &Path) -> anyhow::Result<PathBuf> {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let mut path = dir.join(format!("snippet-{timestamp}.txt"));
+        let mut suffix = 2usize;
+        while path.exists() {
+            path = dir.join(format!("snippet-{timestamp}-{suffix}.txt"));
+            suffix = suffix.saturating_add(1);
+        }
+        Ok(path)
+    }
+
+    fn sidebar_open_file_in_editor_tab(
+        &mut self,
+        path: &Path,
+        cwd: Option<&Path>,
+        label: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {}", parent.display()))?;
+        }
+        if !path.exists() {
+            std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+        }
+
+        let quoted_target = shell_quote(path.to_string_lossy().as_ref());
+        let command = format!(
+            r#"target={quoted_target}
+editor="${{VISUAL:-${{EDITOR:-}}}}"
+if [ -n "$editor" ]; then
+  eval "$editor \"$target\""
+  exit $?
+fi
+for candidate in nvim vim vi nano; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    exec "$candidate" "$target"
+  fi
+done
+echo "No terminal editor found. Set $VISUAL or $EDITOR." >&2
+printf "Press Enter to continue..."
+read -r _
+"#
+        );
+        let spawn = SpawnCommand {
+            label: Some(label.to_string()),
+            args: Some(vec!["sh".to_string(), "-lc".to_string(), command]),
+            cwd: cwd.map(|value| value.to_path_buf()),
+            domain: SpawnTabDomain::CurrentPaneDomain,
+            ..SpawnCommand::default()
+        };
+        self.spawn_command(&spawn, SpawnWhere::NewTab);
+        Ok(())
+    }
+
+    fn sidebar_request_create_snippet(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let dir = sidebar_project_snippets_dir(project_id);
+        let path = self.sidebar_new_snippet_file_path(&dir)?;
+        let project_root = self.sidebar_project_root_path(project_id);
+        self.sidebar_open_file_in_editor_tab(
+            &path,
+            project_root.as_deref(),
+            "Edit Snippet (Project)",
+        )?;
         self.force_workspace_sidebar_refresh();
-        self.show_toast(format!("Added snippet \"{name}\"."));
+        self.show_toast("Opened project snippet file in a new tab".to_string());
+        Ok(())
+    }
+
+    fn sidebar_request_create_global_snippet(&mut self) -> anyhow::Result<()> {
+        let dir = sidebar_global_snippets_dir();
+        let path = self.sidebar_new_snippet_file_path(&dir)?;
+        self.sidebar_open_file_in_editor_tab(
+            &path,
+            Some(config::HOME_DIR.as_path()),
+            "Edit Snippet (Global)",
+        )?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast("Opened global snippet file in a new tab".to_string());
         Ok(())
     }
 
@@ -2066,65 +2235,28 @@ impl crate::TermWindow {
         project_id: &str,
         snippet_id: &str,
     ) -> anyhow::Result<()> {
-        let initial_content = self.sidebar_snippet_content(project_id, snippet_id)?;
-        let row_height = self
-            .render_metrics
-            .cell_size
-            .height
-            .max(1)
-            .saturating_add(12) as usize;
-        let anchor = UIItem {
-            x: 12,
-            y: 32,
-            width: self
-                .sidebar_reserved_width_px()
-                .saturating_sub(24)
-                .clamp(260, 560),
-            height: row_height,
-            item_type: UIItemType::SidebarPanel,
+        let entry = self.sidebar_snippet_entry(project_id, snippet_id)?;
+        let project_root = self.sidebar_project_root_path(project_id);
+        let cwd = if entry.is_global {
+            Some(config::HOME_DIR.as_path())
+        } else {
+            project_root
+                .as_deref()
+                .or(Some(config::HOME_DIR.as_path()))
         };
-        let modal = crate::termwindow::tab_rename::TabRenameModal::new_edit_snippet(
-            self,
-            project_id.to_string(),
-            snippet_id.to_string(),
-            initial_content,
-            anchor,
-        )?;
-        self.set_modal(Rc::new(modal));
+        self.sidebar_open_file_in_editor_tab(&entry.path, cwd, "Edit Snippet")?;
+        self.show_toast("Snippet opened in editor tab".to_string());
         Ok(())
     }
 
-    pub(crate) fn sidebar_edit_snippet_from_modal(
+    fn sidebar_insert_snippet(
         &mut self,
         project_id: &str,
         snippet_id: &str,
-        content: &str,
     ) -> anyhow::Result<()> {
-        let content = content.trim();
-        if content.is_empty() {
-            self.show_toast("Snippet cannot be empty".to_string());
-            return Ok(());
-        }
-
-        let snippets_path = sidebar_project_snippets_path(project_id);
-        let mut snippets_file: SnippetsFile = read_json_file_or_default(&snippets_path)?;
-        let snippet = snippets_file
-            .snippets
-            .iter_mut()
-            .find(|snippet| snippet.id == snippet_id)
-            .ok_or_else(|| anyhow!("snippet not found in storage: {snippet_id}"))?;
-        let name = derive_snippet_name(content);
-        snippet.name = name.clone();
-        snippet.content = content.to_string();
-        snippet.updated_at = Utc::now().to_rfc3339();
-        write_json_file_atomic(&snippets_path, &snippets_file)?;
-        self.force_workspace_sidebar_refresh();
-        self.show_toast(format!("Updated snippet \"{name}\"."));
-        Ok(())
-    }
-
-    fn sidebar_insert_snippet(&mut self, project_id: &str, snippet_id: &str) -> anyhow::Result<()> {
-        let content = self.sidebar_snippet_content(project_id, snippet_id)?;
+        let entry = self.sidebar_snippet_entry(project_id, snippet_id)?;
+        let content = std::fs::read_to_string(&entry.path)
+            .with_context(|| format!("read {}", entry.path.display()))?;
         let pane = self
             .get_active_pane_or_overlay()
             .ok_or_else(|| anyhow!("no active pane to insert snippet"))?;
@@ -2133,18 +2265,15 @@ impl crate::TermWindow {
         Ok(())
     }
 
-    fn sidebar_delete_snippet(&mut self, project_id: &str, snippet_id: &str) -> anyhow::Result<()> {
-        let snippets_path = sidebar_project_snippets_path(project_id);
-        let mut snippets_file: SnippetsFile = read_json_file_or_default(&snippets_path)?;
-        let idx = snippets_file
-            .snippets
-            .iter()
-            .position(|snippet| snippet.id == snippet_id)
-            .ok_or_else(|| anyhow!("snippet not found in storage: {snippet_id}"))?;
-        let removed = snippets_file.snippets.remove(idx);
-        write_json_file_atomic(&snippets_path, &snippets_file)?;
+    fn sidebar_delete_snippet(
+        &mut self,
+        project_id: &str,
+        snippet_id: &str,
+    ) -> anyhow::Result<()> {
+        let entry = self.sidebar_snippet_entry(project_id, snippet_id)?;
+        std::fs::remove_file(&entry.path).with_context(|| format!("delete {}", entry.path.display()))?;
         self.force_workspace_sidebar_refresh();
-        self.show_toast(format!("Deleted snippet \"{}\".", removed.name));
+        self.show_toast(format!("Deleted snippet \"{}\".", entry.name));
         Ok(())
     }
 
@@ -3927,6 +4056,10 @@ fn sidebar_project_resources_root(project_id: &str) -> PathBuf {
         .join("resources")
 }
 
+fn sidebar_project_snippets_dir(project_id: &str) -> PathBuf {
+    sidebar_project_resources_root(project_id).join("snippets")
+}
+
 fn sidebar_project_snippets_path(project_id: &str) -> PathBuf {
     sidebar_project_resources_root(project_id).join("snippets.json")
 }
@@ -3937,6 +4070,10 @@ fn sidebar_project_env_path(project_id: &str) -> PathBuf {
 
 fn sidebar_global_resources_root() -> PathBuf {
     sidebar_state_root().join("resources")
+}
+
+fn sidebar_global_snippets_dir() -> PathBuf {
+    sidebar_global_resources_root().join("snippets")
 }
 
 fn sidebar_global_env_path() -> PathBuf {
@@ -3970,6 +4107,29 @@ fn derive_snippet_name(content: &str) -> String {
         return "snippet".to_string();
     }
     truncate_middle(candidate, 36)
+}
+
+fn sanitize_snippet_filename(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if matches!(ch, '-' | '_' | ' ' | '.') {
+            out.push('-');
+        }
+    }
+    let normalized = out.trim_matches('-').to_string();
+    if normalized.is_empty() {
+        "snippet".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    shlex::try_quote(value)
+        .map(|quoted| quoted.into_owned())
+        .unwrap_or_else(|_| format!("'{}'", value.replace('\'', "'\"'\"'")))
 }
 
 fn parse_env_assignment(raw: &str) -> anyhow::Result<(String, String)> {
