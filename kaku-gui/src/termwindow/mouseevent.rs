@@ -1,18 +1,18 @@
 use crate::tabbar::TabBarItem;
 use crate::termwindow::tab_rename::TabRenameModal;
 use crate::termwindow::{
-    GuiWin, MouseCapture, PositionedSplit, ScrollHit, SidebarAction, TermWindowNotif, UIItem,
-    UIItemType, TMB,
+    GuiWin, MouseCapture, PositionedSplit, ScrollHit, SidebarAction, TMB, TermWindowNotif, UIItem,
+    UIItemType,
 };
 use ::window::{
     MouseButtons as WMB, MouseCursor, MouseEvent, MouseEventKind as WMEK, MousePress, WindowOps,
     WindowState,
 };
-use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
 use config::MouseEventAltScreen;
+use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
+use mux::Mux;
 use mux::pane::{CachePolicy, Pane, WithPaneLines};
 use mux::tab::SplitDirection;
-use mux::Mux;
 use mux_lua::MuxPane;
 use std::convert::TryInto;
 use std::ops::Sub;
@@ -850,6 +850,30 @@ impl super::TermWindow {
                             log::warn!("workspace snippet context menu failed: {:#}", err);
                         }
                     }
+                    SidebarAction::OpenEnvSectionContextMenu { project_id } => {
+                        if let Err(err) = self.sidebar_open_env_section_context_menu(
+                            project_id.as_str(),
+                            event.coords.x,
+                            event.coords.y,
+                        ) {
+                            log::warn!("workspace env section context menu failed: {:#}", err);
+                        }
+                    }
+                    SidebarAction::OpenEnvContextMenu {
+                        project_id,
+                        env_id,
+                        is_global,
+                    } => {
+                        if let Err(err) = self.sidebar_open_env_context_menu(
+                            project_id.as_str(),
+                            env_id.as_str(),
+                            is_global,
+                            event.coords.x,
+                            event.coords.y,
+                        ) {
+                            log::warn!("workspace env context menu failed: {:#}", err);
+                        }
+                    }
                     SidebarAction::ActivateSession {
                         project_id,
                         session_id,
@@ -925,6 +949,37 @@ impl super::TermWindow {
                         event.coords.y,
                     ) {
                         log::warn!("workspace snippet context menu failed: {:#}", err);
+                    }
+                    context.invalidate();
+                }
+                SidebarAction::OpenEnvSectionContextMenu { project_id } => {
+                    if let Err(err) = self.sidebar_open_env_section_context_menu(
+                        project_id.as_str(),
+                        event.coords.x,
+                        event.coords.y,
+                    ) {
+                        log::warn!("workspace env section context menu failed: {:#}", err);
+                    }
+                    context.invalidate();
+                }
+                SidebarAction::InsertEnvVar {
+                    project_id,
+                    env_id,
+                    is_global,
+                }
+                | SidebarAction::OpenEnvContextMenu {
+                    project_id,
+                    env_id,
+                    is_global,
+                } => {
+                    if let Err(err) = self.sidebar_open_env_context_menu(
+                        project_id.as_str(),
+                        env_id.as_str(),
+                        is_global,
+                        event.coords.x,
+                        event.coords.y,
+                    ) {
+                        log::warn!("workspace env context menu failed: {:#}", err);
                     }
                     context.invalidate();
                 }
@@ -1772,8 +1827,8 @@ fn mouse_press_to_tmb(press: &MousePress) -> TMB {
 #[cfg(test)]
 mod tests {
     use super::{
-        mouse_dispatch_target, should_preserve_tmux_bypass_reporting, should_zoom_title_area,
-        MouseDispatchTarget,
+        MouseDispatchTarget, mouse_dispatch_target, should_preserve_tmux_bypass_reporting,
+        should_zoom_title_area,
     };
     use crate::termwindow::MouseCapture;
     use mux::pane::PaneId;

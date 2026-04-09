@@ -11,13 +11,13 @@ use crate::termwindow::{
     SidebarAction, TermWindowNotif, UIItem, UIItemType, WorkspaceSidebarActionHit,
     WorkspaceSidebarPendingOpen, WorkspaceSidebarProject, WorkspaceSidebarSession,
 };
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
 use config::keyassignment::{SpawnCommand, SpawnTabDomain};
+use mux::Mux;
 use mux::pane::{CachePolicy, PaneId};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
-use mux::Mux;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Write;
@@ -28,7 +28,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::surface::Line;
 use wezterm_term::color::ColorAttribute;
-use window::{color::LinearRgba, WindowOps};
+use window::{WindowOps, color::LinearRgba};
 
 const SIDEBAR_DEFAULT_WIDTH_PX: usize = 320;
 const SIDEBAR_MIN_WIDTH_PX: usize = 240;
@@ -115,6 +115,34 @@ struct SnippetEntry {
     name: String,
     #[serde(default)]
     content: String,
+    #[serde(default)]
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnvVarsFile {
+    #[serde(default = "schema_version")]
+    version: u8,
+    #[serde(default)]
+    env: Vec<EnvVarEntry>,
+}
+
+impl Default for EnvVarsFile {
+    fn default() -> Self {
+        Self {
+            version: schema_version(),
+            env: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct EnvVarEntry {
+    id: String,
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    value: String,
     #[serde(default)]
     updated_at: String,
 }
@@ -329,6 +357,14 @@ fn sidebar_status_spinner_frame(elapsed: Duration) -> char {
 struct SidebarSessionMeta {
     title: String,
     root_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct SidebarEnvDisplayEntry {
+    id: String,
+    key: String,
+    value: String,
+    is_global: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -552,6 +588,27 @@ impl crate::TermWindow {
                 project_id,
                 snippet_id,
             } => self.sidebar_delete_snippet(project_id.as_str(), snippet_id.as_str()),
+            SidebarAction::OpenEnvSectionContextMenu { .. } => Ok(()),
+            SidebarAction::CreateEnvVar {
+                project_id,
+                is_global,
+            } => self.sidebar_request_create_env_var(project_id.as_str(), is_global),
+            SidebarAction::InsertEnvVar {
+                project_id,
+                env_id,
+                is_global,
+            } => self.sidebar_insert_env_var(project_id.as_str(), env_id.as_str(), is_global),
+            SidebarAction::OpenEnvContextMenu { .. } => Ok(()),
+            SidebarAction::EditEnvVar {
+                project_id,
+                env_id,
+                is_global,
+            } => self.sidebar_request_edit_env_var(project_id.as_str(), env_id.as_str(), is_global),
+            SidebarAction::DeleteEnvVar {
+                project_id,
+                env_id,
+                is_global,
+            } => self.sidebar_delete_env_var(project_id.as_str(), env_id.as_str(), is_global),
         }
     }
 
@@ -1595,7 +1652,82 @@ impl crate::TermWindow {
                 }
             }
 
-            lines.push(SidebarLine::new("  Env (next)", false).with_tone(SidebarLineTone::Muted));
+            lines.push(
+                SidebarLine::action(
+                    "  Env (plaintext)",
+                    SidebarAction::OpenEnvSectionContextMenu {
+                        project_id: project_id.clone(),
+                    },
+                )
+                .with_tone(SidebarLineTone::Info)
+                .with_trailing_button(
+                    "+",
+                    SidebarAction::OpenEnvSectionContextMenu {
+                        project_id: project_id.clone(),
+                    },
+                ),
+            );
+            match self.sidebar_load_env_entries(project_id.as_str()) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        lines.push(
+                            SidebarLine::new("    (none)", false).with_tone(SidebarLineTone::Muted),
+                        );
+                    } else {
+                        for entry in entries.iter().take(8) {
+                            let scope_tag = if entry.is_global { "G" } else { "P" };
+                            let key_budget = line_char_budget.saturating_sub(16).max(12);
+                            let value_budget = line_char_budget.saturating_sub(20).max(12);
+                            lines.push(
+                                SidebarLine::action(
+                                    format!(
+                                        "    [{scope_tag}] {}",
+                                        truncate_middle(entry.key.as_str(), key_budget)
+                                    ),
+                                    SidebarAction::InsertEnvVar {
+                                        project_id: project_id.clone(),
+                                        env_id: entry.id.clone(),
+                                        is_global: entry.is_global,
+                                    },
+                                )
+                                .with_trailing_button(
+                                    "⋯",
+                                    SidebarAction::OpenEnvContextMenu {
+                                        project_id: project_id.clone(),
+                                        env_id: entry.id.clone(),
+                                        is_global: entry.is_global,
+                                    },
+                                ),
+                            );
+                            lines.push(
+                                SidebarLine::new(
+                                    format!(
+                                        "      = {}",
+                                        truncate_middle(entry.value.as_str(), value_budget)
+                                    ),
+                                    false,
+                                )
+                                .with_tone(SidebarLineTone::Muted),
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    lines.push(
+                        SidebarLine::new(
+                            format!(
+                                "    env load error: {}",
+                                truncate_middle(
+                                    format!("{err:#}").as_str(),
+                                    line_char_budget.saturating_sub(8)
+                                )
+                            ),
+                            false,
+                        )
+                        .with_tone(SidebarLineTone::Warning),
+                    );
+                }
+            }
             lines.push(SidebarLine::new("  Files (next)", false).with_tone(SidebarLineTone::Muted));
         } else {
             lines.push(SidebarLine::new("Resources", true).with_tone(SidebarLineTone::Info));
@@ -1870,6 +2002,245 @@ impl crate::TermWindow {
         write_json_file_atomic(&snippets_path, &snippets_file)?;
         self.force_workspace_sidebar_refresh();
         self.show_toast(format!("Deleted snippet \"{}\".", removed.name));
+        Ok(())
+    }
+
+    fn sidebar_load_env_entries(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<SidebarEnvDisplayEntry>> {
+        let mut entries = Vec::new();
+        let global_env_path = sidebar_global_env_path();
+        let project_env_path = sidebar_project_env_path(project_id);
+
+        let mut global_file: EnvVarsFile = read_json_file_or_default(&global_env_path)?;
+        global_file
+            .env
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        entries.extend(
+            global_file
+                .env
+                .into_iter()
+                .map(|entry| SidebarEnvDisplayEntry {
+                    id: entry.id,
+                    key: entry.key,
+                    value: entry.value,
+                    is_global: true,
+                }),
+        );
+
+        let mut project_file: EnvVarsFile = read_json_file_or_default(&project_env_path)?;
+        project_file
+            .env
+            .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        entries.extend(
+            project_file
+                .env
+                .into_iter()
+                .map(|entry| SidebarEnvDisplayEntry {
+                    id: entry.id,
+                    key: entry.key,
+                    value: entry.value,
+                    is_global: false,
+                }),
+        );
+        Ok(entries)
+    }
+
+    fn sidebar_load_env_file(
+        &self,
+        project_id: &str,
+        is_global: bool,
+    ) -> anyhow::Result<(PathBuf, EnvVarsFile)> {
+        let path = if is_global {
+            sidebar_global_env_path()
+        } else {
+            sidebar_project_env_path(project_id)
+        };
+        let file: EnvVarsFile = read_json_file_or_default(&path)?;
+        Ok((path, file))
+    }
+
+    fn sidebar_env_assignment(
+        &self,
+        project_id: &str,
+        env_id: &str,
+        is_global: bool,
+    ) -> anyhow::Result<String> {
+        let (_, file) = self.sidebar_load_env_file(project_id, is_global)?;
+        let entry = file
+            .env
+            .into_iter()
+            .find(|entry| entry.id == env_id)
+            .ok_or_else(|| anyhow!("env var not found: {project_id}/{env_id}"))?;
+        Ok(format!("{}={}", entry.key, entry.value))
+    }
+
+    fn sidebar_request_create_env_var(
+        &mut self,
+        project_id: &str,
+        is_global: bool,
+    ) -> anyhow::Result<()> {
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let anchor = UIItem {
+            x: 12,
+            y: 32,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(260, 560),
+            height: row_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = crate::termwindow::tab_rename::TabRenameModal::new_create_env_var(
+            self,
+            project_id.to_string(),
+            is_global,
+            anchor,
+        )?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_create_env_var_from_modal(
+        &mut self,
+        project_id: &str,
+        is_global: bool,
+        assignment: &str,
+    ) -> anyhow::Result<()> {
+        let (key, value) = parse_env_assignment(assignment)?;
+        let (path, mut file) = self.sidebar_load_env_file(project_id, is_global)?;
+
+        if file.env.iter().any(|entry| entry.key == key) {
+            self.show_toast(format!("Env key \"{key}\" already exists."));
+            return Ok(());
+        }
+
+        file.env.push(EnvVarEntry {
+            id: generate_sidebar_id("env"),
+            key: key.clone(),
+            value,
+            updated_at: Utc::now().to_rfc3339(),
+        });
+        write_json_file_atomic(&path, &file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!(
+            "Added {} env \"{}\".",
+            if is_global { "global" } else { "project" },
+            key
+        ));
+        Ok(())
+    }
+
+    fn sidebar_request_edit_env_var(
+        &mut self,
+        project_id: &str,
+        env_id: &str,
+        is_global: bool,
+    ) -> anyhow::Result<()> {
+        let initial_assignment = self.sidebar_env_assignment(project_id, env_id, is_global)?;
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let anchor = UIItem {
+            x: 12,
+            y: 32,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(260, 560),
+            height: row_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = crate::termwindow::tab_rename::TabRenameModal::new_edit_env_var(
+            self,
+            project_id.to_string(),
+            env_id.to_string(),
+            is_global,
+            initial_assignment,
+            anchor,
+        )?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_edit_env_var_from_modal(
+        &mut self,
+        project_id: &str,
+        env_id: &str,
+        is_global: bool,
+        assignment: &str,
+    ) -> anyhow::Result<()> {
+        let (key, value) = parse_env_assignment(assignment)?;
+        let (path, mut file) = self.sidebar_load_env_file(project_id, is_global)?;
+
+        if file
+            .env
+            .iter()
+            .any(|entry| entry.id != env_id && entry.key == key)
+        {
+            self.show_toast(format!("Env key \"{key}\" already exists."));
+            return Ok(());
+        }
+
+        let entry = file
+            .env
+            .iter_mut()
+            .find(|entry| entry.id == env_id)
+            .ok_or_else(|| anyhow!("env var not found in storage: {env_id}"))?;
+        entry.key = key.clone();
+        entry.value = value;
+        entry.updated_at = Utc::now().to_rfc3339();
+        write_json_file_atomic(&path, &file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Updated env \"{key}\"."));
+        Ok(())
+    }
+
+    fn sidebar_insert_env_var(
+        &mut self,
+        project_id: &str,
+        env_id: &str,
+        is_global: bool,
+    ) -> anyhow::Result<()> {
+        let assignment = self.sidebar_env_assignment(project_id, env_id, is_global)?;
+        let (key, value) = parse_env_assignment(assignment.as_str())?;
+        let quoted = shlex::try_quote(value.as_str())
+            .map(|quoted| quoted.into_owned())
+            .unwrap_or_else(|_| format!("'{}'", value));
+        let command = format!("export {key}={quoted}");
+        let pane = self
+            .get_active_pane_or_overlay()
+            .ok_or_else(|| anyhow!("no active pane to insert env command"))?;
+        pane.send_paste(command.as_str())?;
+        self.show_toast(format!("Inserted export for \"{key}\"."));
+        Ok(())
+    }
+
+    fn sidebar_delete_env_var(
+        &mut self,
+        project_id: &str,
+        env_id: &str,
+        is_global: bool,
+    ) -> anyhow::Result<()> {
+        let (path, mut file) = self.sidebar_load_env_file(project_id, is_global)?;
+        let idx = file
+            .env
+            .iter()
+            .position(|entry| entry.id == env_id)
+            .ok_or_else(|| anyhow!("env var not found in storage: {env_id}"))?;
+        let removed = file.env.remove(idx);
+        write_json_file_atomic(&path, &file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Deleted env \"{}\".", removed.key));
         Ok(())
     }
 
@@ -2363,6 +2734,107 @@ impl crate::TermWindow {
                 SidebarAction::DeleteSnippet {
                     project_id,
                     snippet_id,
+                },
+            ),
+        ];
+
+        let anchor = UIItem {
+            x: mouse_x.max(0) as usize,
+            y: mouse_y.max(0) as usize,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(220, 360),
+            height: self
+                .render_metrics
+                .cell_size
+                .height
+                .max(1)
+                .saturating_add(8) as usize,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = SidebarContextMenuModal::new(self, anchor, items)?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_open_env_section_context_menu(
+        &mut self,
+        project_id: &str,
+        mouse_x: isize,
+        mouse_y: isize,
+    ) -> anyhow::Result<()> {
+        let project_id = project_id.to_string();
+        let items = vec![
+            SidebarContextMenuItem::new(
+                "Add Project Env",
+                SidebarAction::CreateEnvVar {
+                    project_id: project_id.clone(),
+                    is_global: false,
+                },
+            ),
+            SidebarContextMenuItem::new(
+                "Add Global Env",
+                SidebarAction::CreateEnvVar {
+                    project_id,
+                    is_global: true,
+                },
+            ),
+        ];
+
+        let anchor = UIItem {
+            x: mouse_x.max(0) as usize,
+            y: mouse_y.max(0) as usize,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(220, 360),
+            height: self
+                .render_metrics
+                .cell_size
+                .height
+                .max(1)
+                .saturating_add(8) as usize,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = SidebarContextMenuModal::new(self, anchor, items)?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_open_env_context_menu(
+        &mut self,
+        project_id: &str,
+        env_id: &str,
+        is_global: bool,
+        mouse_x: isize,
+        mouse_y: isize,
+    ) -> anyhow::Result<()> {
+        let project_id = project_id.to_string();
+        let env_id = env_id.to_string();
+        let items = vec![
+            SidebarContextMenuItem::new(
+                "Insert Export",
+                SidebarAction::InsertEnvVar {
+                    project_id: project_id.clone(),
+                    env_id: env_id.clone(),
+                    is_global,
+                },
+            ),
+            SidebarContextMenuItem::new(
+                "Edit Env",
+                SidebarAction::EditEnvVar {
+                    project_id: project_id.clone(),
+                    env_id: env_id.clone(),
+                    is_global,
+                },
+            ),
+            SidebarContextMenuItem::danger(
+                "Delete Env",
+                SidebarAction::DeleteEnvVar {
+                    project_id,
+                    env_id,
+                    is_global,
                 },
             ),
         ];
@@ -2889,6 +3361,18 @@ fn sidebar_project_snippets_path(project_id: &str) -> PathBuf {
     sidebar_project_resources_root(project_id).join("snippets.json")
 }
 
+fn sidebar_project_env_path(project_id: &str) -> PathBuf {
+    sidebar_project_resources_root(project_id).join("env.json")
+}
+
+fn sidebar_global_resources_root() -> PathBuf {
+    sidebar_state_root().join("resources")
+}
+
+fn sidebar_global_env_path() -> PathBuf {
+    sidebar_global_resources_root().join("env.json")
+}
+
 fn sidebar_session_key(project_id: &str, session_id: &str) -> String {
     format!("{project_id}::{session_id}")
 }
@@ -2908,6 +3392,30 @@ fn derive_snippet_name(content: &str) -> String {
         return "snippet".to_string();
     }
     truncate_middle(candidate, 36)
+}
+
+fn parse_env_assignment(raw: &str) -> anyhow::Result<(String, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("env input cannot be empty");
+    }
+
+    let (key, value) = trimmed
+        .split_once('=')
+        .ok_or_else(|| anyhow!("env format must be KEY=VALUE"))?;
+    let key = key.trim();
+    if key.is_empty() {
+        bail!("env key cannot be empty");
+    }
+    let mut key_chars = key.chars();
+    match key_chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => bail!("env key must start with [A-Za-z_]"),
+    }
+    if !key_chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        bail!("env key can only contain [A-Za-z0-9_]");
+    }
+    Ok((key.to_string(), value.to_string()))
 }
 
 fn ensure_sidebar_project_for_cwd(cwd: &Path) -> anyhow::Result<String> {
@@ -3120,11 +3628,7 @@ fn is_stale_transient_session_status(status: &str, updated_at: &str, now: DateTi
 }
 
 fn pluralize_session(count: usize) -> &'static str {
-    if count == 1 {
-        "session"
-    } else {
-        "sessions"
-    }
+    if count == 1 { "session" } else { "sessions" }
 }
 
 fn schema_version() -> u8 {
@@ -3255,6 +3759,8 @@ fn sidebar_action_needs_pointer_position(action: &SidebarAction) -> bool {
         SidebarAction::OpenSessionContextMenu { .. }
             | SidebarAction::OpenProjectContextMenu { .. }
             | SidebarAction::OpenSnippetContextMenu { .. }
+            | SidebarAction::OpenEnvSectionContextMenu { .. }
+            | SidebarAction::OpenEnvContextMenu { .. }
     )
 }
 
@@ -3361,13 +3867,13 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_codex_command, is_codex_process_name, is_stale_transient_session_status,
-        normalize_transient_session_status, parse_session_status_confidence,
-        parse_session_status_source, pick_project_for_cwd, pick_session_for_inferred_binding,
+        SessionEntry, SidebarAction, SidebarLineTone, SidebarSessionStatus,
+        WorkspaceSidebarProject, WorkspaceSidebarSession, is_codex_command, is_codex_process_name,
+        is_stale_transient_session_status, normalize_transient_session_status,
+        parse_env_assignment, parse_session_status_confidence, parse_session_status_source,
+        pick_project_for_cwd, pick_session_for_inferred_binding,
         sidebar_action_needs_pointer_position, sidebar_next_session_title,
         sidebar_status_is_animating, sidebar_status_signal_tag, sidebar_status_spinner_frame,
-        SessionEntry, SidebarAction, SidebarLineTone, SidebarSessionStatus,
-        WorkspaceSidebarProject, WorkspaceSidebarSession,
     };
     use crate::agent_status::events::{
         SessionStatus, SessionStatusConfidence, SessionStatusSource,
@@ -3573,9 +4079,35 @@ mod tests {
                 snippet_id: "snip".to_string(),
             }
         ));
+        assert!(sidebar_action_needs_pointer_position(
+            &SidebarAction::OpenEnvSectionContextMenu {
+                project_id: "proj".to_string(),
+            }
+        ));
+        assert!(sidebar_action_needs_pointer_position(
+            &SidebarAction::OpenEnvContextMenu {
+                project_id: "proj".to_string(),
+                env_id: "env".to_string(),
+                is_global: false,
+            }
+        ));
         assert!(!sidebar_action_needs_pointer_position(
             &SidebarAction::CreateProject
         ));
+    }
+
+    #[test]
+    fn parses_valid_env_assignment() {
+        let parsed = parse_env_assignment("FOO_BAR=hello world").expect("valid env assignment");
+        assert_eq!(parsed.0, "FOO_BAR");
+        assert_eq!(parsed.1, "hello world");
+    }
+
+    #[test]
+    fn rejects_invalid_env_assignment() {
+        assert!(parse_env_assignment("NO_EQUALS").is_err());
+        assert!(parse_env_assignment("1BAD=value").is_err());
+        assert!(parse_env_assignment("BAD-KEY=value").is_err());
     }
 
     #[test]
