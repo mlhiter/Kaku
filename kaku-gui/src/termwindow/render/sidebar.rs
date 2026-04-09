@@ -14,12 +14,13 @@ use crate::termwindow::{
 use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
 use config::keyassignment::{SpawnCommand, SpawnTabDomain};
+use image::ImageReader;
 use mux::Mux;
 use mux::pane::{CachePolicy, PaneId};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -27,6 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::surface::Line;
+use wezterm_dynamic::Value as DynamicValue;
 use wezterm_term::color::ColorAttribute;
 use window::{WindowOps, color::LinearRgba};
 
@@ -145,6 +147,69 @@ struct EnvVarEntry {
     value: String,
     #[serde(default)]
     updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectBackgroundFile {
+    #[serde(default = "schema_version")]
+    version: u8,
+    #[serde(default)]
+    background: ProjectBackgroundState,
+    #[serde(default)]
+    readability: ProjectReadabilityState,
+}
+
+impl Default for ProjectBackgroundFile {
+    fn default() -> Self {
+        Self {
+            version: schema_version(),
+            background: ProjectBackgroundState::default(),
+            readability: ProjectReadabilityState::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectBackgroundState {
+    #[serde(default)]
+    image_path: String,
+    #[serde(default = "default_background_fit_mode")]
+    fit_mode: String,
+    #[serde(default = "default_background_overlay_alpha")]
+    overlay_alpha: f32,
+}
+
+impl Default for ProjectBackgroundState {
+    fn default() -> Self {
+        Self {
+            image_path: String::new(),
+            fit_mode: default_background_fit_mode(),
+            overlay_alpha: default_background_overlay_alpha(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProjectReadabilityState {
+    #[serde(default = "default_readability_mode")]
+    mode: String,
+    #[serde(default = "default_readability_fg")]
+    current_fg: String,
+    #[serde(default)]
+    last_luminance: f64,
+    #[serde(default)]
+    last_contrast_ratio: f64,
+}
+
+impl Default for ProjectReadabilityState {
+    fn default() -> Self {
+        Self {
+            mode: default_readability_mode(),
+            current_fg: default_readability_fg(),
+            last_luminance: 0.0,
+            last_contrast_ratio: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -609,6 +674,23 @@ impl crate::TermWindow {
                 env_id,
                 is_global,
             } => self.sidebar_delete_env_var(project_id.as_str(), env_id.as_str(), is_global),
+            SidebarAction::OpenBackgroundContextMenu { .. } => Ok(()),
+            SidebarAction::SetBackgroundImage { project_id } => {
+                self.sidebar_request_set_background_image(project_id.as_str())
+            }
+            SidebarAction::ClearBackgroundImage { project_id } => {
+                self.sidebar_clear_background_image(project_id.as_str())
+            }
+            SidebarAction::SetBackgroundFitMode {
+                project_id,
+                fit_mode,
+            } => self.sidebar_set_background_fit_mode(project_id.as_str(), fit_mode.as_str()),
+            SidebarAction::SetBackgroundOverlay { project_id } => {
+                self.sidebar_request_set_background_overlay(project_id.as_str())
+            }
+            SidebarAction::ToggleBackgroundReadability { project_id } => {
+                self.sidebar_toggle_background_readability(project_id.as_str())
+            }
         }
     }
 
@@ -913,6 +995,20 @@ impl crate::TermWindow {
                 .map(|project| project.id.clone());
         }
 
+        None
+    }
+
+    fn sidebar_active_project_for_resources(&mut self) -> Option<String> {
+        if let Some((project_id, _)) = self.sidebar_active_project_and_session() {
+            return Some(project_id);
+        }
+        if self.workspace_sidebar.projects.len() == 1 {
+            return self
+                .workspace_sidebar
+                .projects
+                .first()
+                .map(|project| project.id.clone());
+        }
         None
     }
 
@@ -1296,6 +1392,7 @@ impl crate::TermWindow {
             .unwrap_or(true);
 
         if !should_refresh {
+            self.sidebar_sync_background_for_active_project();
             return;
         }
 
@@ -1309,6 +1406,7 @@ impl crate::TermWindow {
             }
         }
         self.workspace_sidebar.last_loaded_at = Some(now);
+        self.sidebar_sync_background_for_active_project();
     }
 
     fn force_workspace_sidebar_refresh(&mut self) {
@@ -1586,7 +1684,7 @@ impl crate::TermWindow {
             self.update_next_frame_time(Some(Instant::now() + SIDEBAR_STATUS_SPINNER_INTERVAL));
         }
 
-        let resources_project = self.sidebar_active_project_for_shortcuts();
+        let resources_project = self.sidebar_active_project_for_resources();
         if let Some(project_id) = resources_project.as_ref() {
             let project_label = self.sidebar_project_display_name(project_id.as_str());
             lines.push(
@@ -1728,6 +1826,51 @@ impl crate::TermWindow {
                     );
                 }
             }
+
+            let background_file = self
+                .sidebar_load_project_background_file(project_id.as_str())
+                .unwrap_or_default();
+            let image_display = if background_file.background.image_path.trim().is_empty() {
+                "(none)".to_string()
+            } else {
+                truncate_middle(
+                    background_file.background.image_path.as_str(),
+                    line_char_budget.saturating_sub(18).max(16),
+                )
+            };
+            lines.push(
+                SidebarLine::action(
+                    format!("  Background: {image_display}"),
+                    SidebarAction::OpenBackgroundContextMenu {
+                        project_id: project_id.clone(),
+                    },
+                )
+                .with_tone(SidebarLineTone::Info)
+                .with_trailing_button(
+                    "⋯",
+                    SidebarAction::OpenBackgroundContextMenu {
+                        project_id: project_id.clone(),
+                    },
+                ),
+            );
+            let fit_mode = normalize_background_fit_mode(background_file.background.fit_mode.as_str());
+            let readability_mode = if background_file.readability.mode == "auto" {
+                "auto"
+            } else {
+                "manual"
+            };
+            let fg_mode = normalize_readability_fg(background_file.readability.current_fg.as_str());
+            lines.push(
+                SidebarLine::new(
+                    format!(
+                        "    fit:{fit_mode} overlay:{:.2} mode:{readability_mode} fg:{fg_mode} contrast:{:.2}",
+                        background_file.background.overlay_alpha,
+                        background_file.readability.last_contrast_ratio
+                    ),
+                    false,
+                )
+                .with_tone(SidebarLineTone::Muted),
+            );
             lines.push(SidebarLine::new("  Files (next)", false).with_tone(SidebarLineTone::Muted));
         } else {
             lines.push(SidebarLine::new("Resources", true).with_tone(SidebarLineTone::Info));
@@ -2241,6 +2384,334 @@ impl crate::TermWindow {
         write_json_file_atomic(&path, &file)?;
         self.force_workspace_sidebar_refresh();
         self.show_toast(format!("Deleted env \"{}\".", removed.key));
+        Ok(())
+    }
+
+    fn sidebar_load_project_background_file(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<ProjectBackgroundFile> {
+        let path = sidebar_project_background_path(project_id);
+        read_json_file_or_default(&path)
+    }
+
+    fn sidebar_save_project_background_file(
+        &self,
+        project_id: &str,
+        file: &ProjectBackgroundFile,
+    ) -> anyhow::Result<()> {
+        let path = sidebar_project_background_path(project_id);
+        write_json_file_atomic(&path, file)
+    }
+
+    fn sidebar_recompute_background_readability(
+        &self,
+        file: &mut ProjectBackgroundFile,
+    ) -> anyhow::Result<()> {
+        let image_path = file.background.image_path.trim();
+        if image_path.is_empty() {
+            file.readability.last_luminance = 0.0;
+            file.readability.last_contrast_ratio = 0.0;
+            return Ok(());
+        }
+
+        let luminance = compute_background_luminance(Path::new(image_path))?;
+        let auto_mode = file.readability.mode.as_str() == "auto";
+        let mut fg = normalize_readability_fg(file.readability.current_fg.as_str()).to_string();
+        if auto_mode {
+            if luminance > 0.60 {
+                fg = "dark".to_string();
+            } else if luminance < 0.45 {
+                fg = "light".to_string();
+            } else if fg.is_empty() {
+                fg = if luminance > 0.5 {
+                    "dark".to_string()
+                } else {
+                    "light".to_string()
+                };
+            }
+        }
+        if fg.is_empty() {
+            fg = "light".to_string();
+        }
+
+        let mut overlay = file.background.overlay_alpha.clamp(0.0, 0.60);
+        let mut effective_luminance = apply_overlay_to_luminance(luminance, overlay as f64);
+        let mut contrast = contrast_ratio_for_readability_fg(fg.as_str(), effective_luminance);
+        if auto_mode && contrast < 4.5 {
+            overlay = overlay.max(0.36).min(0.60);
+            effective_luminance = apply_overlay_to_luminance(luminance, overlay as f64);
+            contrast = contrast_ratio_for_readability_fg(fg.as_str(), effective_luminance);
+        }
+
+        file.background.overlay_alpha = overlay;
+        file.readability.current_fg = fg;
+        file.readability.last_luminance = luminance;
+        file.readability.last_contrast_ratio = contrast;
+        Ok(())
+    }
+
+    fn sidebar_build_background_override_values(
+        &self,
+        file: &ProjectBackgroundFile,
+    ) -> Option<BTreeMap<DynamicValue, DynamicValue>> {
+        let image_path = file.background.image_path.trim();
+        if image_path.is_empty() {
+            return None;
+        }
+
+        let fit_mode = normalize_background_fit_mode(file.background.fit_mode.as_str());
+        let size_value = match fit_mode {
+            "fit" => DynamicValue::String("Contain".to_string()),
+            "stretch" => DynamicValue::String("100%".to_string()),
+            _ => DynamicValue::String("Cover".to_string()),
+        };
+
+        let source_object: BTreeMap<DynamicValue, DynamicValue> = vec![(
+            DynamicValue::String("File".to_string()),
+            DynamicValue::String(image_path.to_string()),
+        )]
+        .into_iter()
+        .collect();
+
+        let layer_object: BTreeMap<DynamicValue, DynamicValue> = vec![
+            (
+                DynamicValue::String("source".to_string()),
+                DynamicValue::Object(source_object.into()),
+            ),
+            (
+                DynamicValue::String("repeat_x".to_string()),
+                DynamicValue::String("NoRepeat".to_string()),
+            ),
+            (
+                DynamicValue::String("repeat_y".to_string()),
+                DynamicValue::String("NoRepeat".to_string()),
+            ),
+            (DynamicValue::String("width".to_string()), size_value.clone()),
+            (DynamicValue::String("height".to_string()), size_value),
+        ]
+        .into_iter()
+        .collect();
+
+        let background_layers = DynamicValue::Array(vec![DynamicValue::Object(layer_object.into())].into());
+        let overlay = file.background.overlay_alpha.clamp(0.0, 0.60) as f64;
+        let window_background_opacity = (1.0 - overlay).clamp(0.40, 1.0);
+        let color_scheme = if normalize_readability_fg(file.readability.current_fg.as_str()) == "dark"
+        {
+            "Kaku Light"
+        } else {
+            "Kaku Dark"
+        };
+
+        let overrides: BTreeMap<DynamicValue, DynamicValue> = vec![
+            (
+                DynamicValue::String("background".to_string()),
+                background_layers,
+            ),
+            (
+                DynamicValue::String("window_background_opacity".to_string()),
+                DynamicValue::F64(window_background_opacity.into()),
+            ),
+            (
+                DynamicValue::String("text_background_opacity".to_string()),
+                DynamicValue::F64(1.0f64.into()),
+            ),
+            (
+                DynamicValue::String("color_scheme".to_string()),
+                DynamicValue::String(color_scheme.to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        Some(overrides)
+    }
+
+    fn sidebar_apply_background_overrides(
+        &mut self,
+        overrides: Option<BTreeMap<DynamicValue, DynamicValue>>,
+    ) {
+        let mut object: BTreeMap<DynamicValue, DynamicValue> = match &self.config_overrides {
+            DynamicValue::Object(obj) => obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            _ => BTreeMap::new(),
+        };
+
+        for key in [
+            "background",
+            "window_background_image",
+            "window_background_image_hsb",
+            "window_background_opacity",
+            "text_background_opacity",
+            "color_scheme",
+        ] {
+            object.remove(&DynamicValue::String(key.to_string()));
+        }
+
+        if let Some(new_values) = overrides {
+            for (key, value) in new_values {
+                object.insert(key, value);
+            }
+        }
+
+        let next = if object.is_empty() {
+            DynamicValue::Null
+        } else {
+            DynamicValue::Object(object.into())
+        };
+        if next != self.config_overrides {
+            self.config_overrides = next;
+            if let Some(window) = self.window.clone() {
+                self.schedule_silent_config_reload(&window);
+            }
+        }
+    }
+
+    fn sidebar_sync_background_for_active_project(&mut self) {
+        let active_project = self.sidebar_active_project_for_resources();
+        let overrides = active_project
+            .as_deref()
+            .and_then(|project_id| self.sidebar_load_project_background_file(project_id).ok())
+            .and_then(|file| self.sidebar_build_background_override_values(&file));
+        self.sidebar_apply_background_overrides(overrides);
+    }
+
+    fn sidebar_request_set_background_image(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let file = self
+            .sidebar_load_project_background_file(project_id)
+            .unwrap_or_default();
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let anchor = UIItem {
+            x: 12,
+            y: 32,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(260, 560),
+            height: row_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = crate::termwindow::tab_rename::TabRenameModal::new_set_background_image(
+            self,
+            project_id.to_string(),
+            file.background.image_path,
+            anchor,
+        )?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_set_background_image_from_modal(
+        &mut self,
+        project_id: &str,
+        image_path: &str,
+    ) -> anyhow::Result<()> {
+        let normalized = normalize_background_image_path(image_path)?;
+        let mut file = self
+            .sidebar_load_project_background_file(project_id)
+            .unwrap_or_default();
+        file.background.image_path = normalized.clone();
+        self.sidebar_recompute_background_readability(&mut file)?;
+        self.sidebar_save_project_background_file(project_id, &file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(if normalized.is_empty() {
+            "Cleared background image".to_string()
+        } else {
+            "Updated background image".to_string()
+        });
+        Ok(())
+    }
+
+    fn sidebar_request_set_background_overlay(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let file = self
+            .sidebar_load_project_background_file(project_id)
+            .unwrap_or_default();
+        let row_height = self
+            .render_metrics
+            .cell_size
+            .height
+            .max(1)
+            .saturating_add(12) as usize;
+        let anchor = UIItem {
+            x: 12,
+            y: 32,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(260, 560),
+            height: row_height,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = crate::termwindow::tab_rename::TabRenameModal::new_set_background_overlay(
+            self,
+            project_id.to_string(),
+            file.background.overlay_alpha,
+            anchor,
+        )?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
+    pub(crate) fn sidebar_set_background_overlay_from_modal(
+        &mut self,
+        project_id: &str,
+        overlay: &str,
+    ) -> anyhow::Result<()> {
+        let overlay_alpha = parse_background_overlay_alpha(overlay)?;
+        let mut file = self
+            .sidebar_load_project_background_file(project_id)
+            .unwrap_or_default();
+        file.background.overlay_alpha = overlay_alpha;
+        self.sidebar_recompute_background_readability(&mut file)?;
+        self.sidebar_save_project_background_file(project_id, &file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Background overlay set to {:.2}", overlay_alpha));
+        Ok(())
+    }
+
+    fn sidebar_set_background_fit_mode(
+        &mut self,
+        project_id: &str,
+        fit_mode: &str,
+    ) -> anyhow::Result<()> {
+        let mut file = self
+            .sidebar_load_project_background_file(project_id)
+            .unwrap_or_default();
+        file.background.fit_mode = normalize_background_fit_mode(fit_mode).to_string();
+        self.sidebar_save_project_background_file(project_id, &file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Background fit mode: {}", file.background.fit_mode));
+        Ok(())
+    }
+
+    fn sidebar_toggle_background_readability(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let mut file = self
+            .sidebar_load_project_background_file(project_id)
+            .unwrap_or_default();
+        file.readability.mode = if file.readability.mode == "auto" {
+            "manual".to_string()
+        } else {
+            "auto".to_string()
+        };
+        self.sidebar_recompute_background_readability(&mut file)?;
+        self.sidebar_save_project_background_file(project_id, &file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast(format!("Readability mode: {}", file.readability.mode));
+        Ok(())
+    }
+
+    fn sidebar_clear_background_image(&mut self, project_id: &str) -> anyhow::Result<()> {
+        let mut file = self
+            .sidebar_load_project_background_file(project_id)
+            .unwrap_or_default();
+        file.background.image_path.clear();
+        self.sidebar_recompute_background_readability(&mut file)?;
+        self.sidebar_save_project_background_file(project_id, &file)?;
+        self.force_workspace_sidebar_refresh();
+        self.show_toast("Cleared project background".to_string());
         Ok(())
     }
 
@@ -2859,6 +3330,105 @@ impl crate::TermWindow {
         Ok(())
     }
 
+    pub(crate) fn sidebar_open_background_context_menu(
+        &mut self,
+        project_id: &str,
+        mouse_x: isize,
+        mouse_y: isize,
+    ) -> anyhow::Result<()> {
+        let project_id = project_id.to_string();
+        let file = self
+            .sidebar_load_project_background_file(project_id.as_str())
+            .unwrap_or_default();
+        let fit_mode = normalize_background_fit_mode(file.background.fit_mode.as_str());
+        let auto_readability = file.readability.mode == "auto";
+        let has_image = !file.background.image_path.trim().is_empty();
+        let mut items = vec![
+            SidebarContextMenuItem::new(
+                "Set Background Image Path",
+                SidebarAction::SetBackgroundImage {
+                    project_id: project_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                "Set Overlay Alpha",
+                SidebarAction::SetBackgroundOverlay {
+                    project_id: project_id.clone(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                if fit_mode == "fill" {
+                    "Fit: Fill (active)"
+                } else {
+                    "Fit: Fill"
+                },
+                SidebarAction::SetBackgroundFitMode {
+                    project_id: project_id.clone(),
+                    fit_mode: "fill".to_string(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                if fit_mode == "fit" {
+                    "Fit: Fit (active)"
+                } else {
+                    "Fit: Fit"
+                },
+                SidebarAction::SetBackgroundFitMode {
+                    project_id: project_id.clone(),
+                    fit_mode: "fit".to_string(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                if fit_mode == "stretch" {
+                    "Fit: Stretch (active)"
+                } else {
+                    "Fit: Stretch"
+                },
+                SidebarAction::SetBackgroundFitMode {
+                    project_id: project_id.clone(),
+                    fit_mode: "stretch".to_string(),
+                },
+            ),
+            SidebarContextMenuItem::new(
+                if auto_readability {
+                    "Readability Auto: On"
+                } else {
+                    "Readability Auto: Off"
+                },
+                SidebarAction::ToggleBackgroundReadability {
+                    project_id: project_id.clone(),
+                },
+            ),
+        ];
+        if has_image {
+            items.push(SidebarContextMenuItem::danger(
+                "Clear Background Image",
+                SidebarAction::ClearBackgroundImage {
+                    project_id: project_id.clone(),
+                },
+            ));
+        }
+
+        let anchor = UIItem {
+            x: mouse_x.max(0) as usize,
+            y: mouse_y.max(0) as usize,
+            width: self
+                .sidebar_reserved_width_px()
+                .saturating_sub(24)
+                .clamp(240, 420),
+            height: self
+                .render_metrics
+                .cell_size
+                .height
+                .max(1)
+                .saturating_add(8) as usize,
+            item_type: UIItemType::SidebarPanel,
+        };
+        let modal = SidebarContextMenuModal::new(self, anchor, items)?;
+        self.set_modal(Rc::new(modal));
+        Ok(())
+    }
+
     fn sidebar_request_delete_session(
         &mut self,
         project_id: &str,
@@ -3373,6 +3943,14 @@ fn sidebar_global_env_path() -> PathBuf {
     sidebar_global_resources_root().join("env.json")
 }
 
+fn sidebar_project_background_path(project_id: &str) -> PathBuf {
+    sidebar_state_root()
+        .join("projects")
+        .join(project_id)
+        .join("ui")
+        .join("background.json")
+}
+
 fn sidebar_session_key(project_id: &str, session_id: &str) -> String {
     format!("{project_id}::{session_id}")
 }
@@ -3416,6 +3994,129 @@ fn parse_env_assignment(raw: &str) -> anyhow::Result<(String, String)> {
         bail!("env key can only contain [A-Za-z0-9_]");
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+fn default_background_fit_mode() -> String {
+    "fill".to_string()
+}
+
+fn default_background_overlay_alpha() -> f32 {
+    0.22
+}
+
+fn default_readability_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_readability_fg() -> String {
+    "light".to_string()
+}
+
+fn normalize_background_fit_mode(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "fit" | "contain" => "fit",
+        "stretch" => "stretch",
+        _ => "fill",
+    }
+}
+
+fn normalize_readability_fg(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "dark" | "black" => "dark",
+        _ => "light",
+    }
+}
+
+fn apply_overlay_to_luminance(luminance: f64, overlay_alpha: f64) -> f64 {
+    (luminance * (1.0 - overlay_alpha.clamp(0.0, 0.95))).clamp(0.0, 1.0)
+}
+
+fn contrast_ratio_for_readability_fg(fg: &str, background_luminance: f64) -> f64 {
+    let bg = background_luminance.clamp(0.0, 1.0);
+    if normalize_readability_fg(fg) == "dark" {
+        (bg + 0.05) / 0.05
+    } else {
+        1.05 / (bg + 0.05)
+    }
+}
+
+fn normalize_background_image_path(raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(String::new());
+    }
+
+    let expanded = if trimmed == "~" {
+        config::HOME_DIR.clone()
+    } else if let Some(suffix) = trimmed.strip_prefix("~/") {
+        config::HOME_DIR.join(suffix)
+    } else {
+        PathBuf::from(trimmed)
+    };
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()
+            .context("read current directory")?
+            .join(expanded)
+    };
+    if !absolute.is_file() {
+        bail!("background image file not found: {}", absolute.display());
+    }
+    let canonical = absolute.canonicalize().unwrap_or(absolute);
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+fn parse_background_overlay_alpha(raw: &str) -> anyhow::Result<f32> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("overlay alpha cannot be empty");
+    }
+    let value: f32 = trimmed
+        .parse()
+        .with_context(|| format!("invalid overlay alpha: {trimmed}"))?;
+    Ok(value.clamp(0.0, 0.60))
+}
+
+fn compute_background_luminance(path: &Path) -> anyhow::Result<f64> {
+    let image = ImageReader::open(path)
+        .with_context(|| format!("open background image {}", path.display()))?
+        .decode()
+        .with_context(|| format!("decode background image {}", path.display()))?
+        .to_rgb8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        bail!("background image has invalid dimensions");
+    }
+
+    let max_samples = 4096u64;
+    let total_pixels = (width as u64).saturating_mul(height as u64).max(1);
+    let stride = ((total_pixels as f64 / max_samples as f64).sqrt().floor() as u32).max(1);
+    let mut sum = 0.0f64;
+    let mut count = 0u64;
+
+    for y in (0..height).step_by(stride as usize) {
+        for x in (0..width).step_by(stride as usize) {
+            let px = image.get_pixel(x, y);
+            let r = (px[0] as f64) / 255.0;
+            let g = (px[1] as f64) / 255.0;
+            let b = (px[2] as f64) / 255.0;
+            let linear = |v: f64| {
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            sum += 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+            count = count.saturating_add(1);
+        }
+    }
+
+    if count == 0 {
+        bail!("background image sampling produced no pixels");
+    }
+    Ok((sum / count as f64).clamp(0.0, 1.0))
 }
 
 fn ensure_sidebar_project_for_cwd(cwd: &Path) -> anyhow::Result<String> {
@@ -3761,6 +4462,7 @@ fn sidebar_action_needs_pointer_position(action: &SidebarAction) -> bool {
             | SidebarAction::OpenSnippetContextMenu { .. }
             | SidebarAction::OpenEnvSectionContextMenu { .. }
             | SidebarAction::OpenEnvContextMenu { .. }
+            | SidebarAction::OpenBackgroundContextMenu { .. }
     )
 }
 
@@ -4089,6 +4791,11 @@ mod tests {
                 project_id: "proj".to_string(),
                 env_id: "env".to_string(),
                 is_global: false,
+            }
+        ));
+        assert!(sidebar_action_needs_pointer_position(
+            &SidebarAction::OpenBackgroundContextMenu {
+                project_id: "proj".to_string(),
             }
         ));
         assert!(!sidebar_action_needs_pointer_position(

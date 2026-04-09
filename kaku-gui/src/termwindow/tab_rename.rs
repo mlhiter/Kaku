@@ -55,6 +55,12 @@ enum RenameTarget {
         env_id: String,
         is_global: bool,
     },
+    SetBackgroundImage {
+        project_id: String,
+    },
+    SetBackgroundOverlay {
+        project_id: String,
+    },
 }
 
 pub struct TabRenameModal {
@@ -273,6 +279,49 @@ impl TabRenameModal {
             style_tab_id,
             anchor,
             value: RefCell::new(initial_assignment),
+            cursor: RefCell::new(cursor),
+            selection: RefCell::new(None),
+        };
+        modal.reconfigure(term_window);
+        Ok(modal)
+    }
+
+    pub fn new_set_background_image(
+        term_window: &mut TermWindow,
+        project_id: String,
+        current_path: String,
+        anchor: UIItem,
+    ) -> anyhow::Result<Self> {
+        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for prompt")?;
+        let cursor = current_path.chars().count();
+        let modal = Self {
+            element: RefCell::new(None),
+            target: RenameTarget::SetBackgroundImage { project_id },
+            style_tab_id,
+            anchor,
+            value: RefCell::new(current_path),
+            cursor: RefCell::new(cursor),
+            selection: RefCell::new(None),
+        };
+        modal.reconfigure(term_window);
+        Ok(modal)
+    }
+
+    pub fn new_set_background_overlay(
+        term_window: &mut TermWindow,
+        project_id: String,
+        current_overlay: f32,
+        anchor: UIItem,
+    ) -> anyhow::Result<Self> {
+        let style_tab_id = Self::active_tab_id(term_window).context("no active tab for prompt")?;
+        let initial = format!("{current_overlay:.2}");
+        let cursor = initial.chars().count();
+        let modal = Self {
+            element: RefCell::new(None),
+            target: RenameTarget::SetBackgroundOverlay { project_id },
+            style_tab_id,
+            anchor,
+            value: RefCell::new(initial),
             cursor: RefCell::new(cursor),
             selection: RefCell::new(None),
         };
@@ -600,6 +649,22 @@ impl TabRenameModal {
                 ) {
                     log::warn!("edit env from modal failed: {:#}", err);
                     term_window.show_toast("Failed to update env var".to_string());
+                }
+            }
+            RenameTarget::SetBackgroundImage { project_id } => {
+                if let Err(err) =
+                    term_window.sidebar_set_background_image_from_modal(project_id.as_str(), value.as_str())
+                {
+                    log::warn!("set background image from modal failed: {:#}", err);
+                    term_window.show_toast("Failed to set background image".to_string());
+                }
+            }
+            RenameTarget::SetBackgroundOverlay { project_id } => {
+                if let Err(err) = term_window
+                    .sidebar_set_background_overlay_from_modal(project_id.as_str(), value.as_str())
+                {
+                    log::warn!("set background overlay from modal failed: {:#}", err);
+                    term_window.show_toast("Failed to set background overlay".to_string());
                 }
             }
         }

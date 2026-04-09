@@ -874,6 +874,15 @@ impl super::TermWindow {
                             log::warn!("workspace env context menu failed: {:#}", err);
                         }
                     }
+                    SidebarAction::OpenBackgroundContextMenu { project_id } => {
+                        if let Err(err) = self.sidebar_open_background_context_menu(
+                            project_id.as_str(),
+                            event.coords.x,
+                            event.coords.y,
+                        ) {
+                            log::warn!("workspace background context menu failed: {:#}", err);
+                        }
+                    }
                     SidebarAction::ActivateSession {
                         project_id,
                         session_id,
@@ -980,6 +989,16 @@ impl super::TermWindow {
                         event.coords.y,
                     ) {
                         log::warn!("workspace env context menu failed: {:#}", err);
+                    }
+                    context.invalidate();
+                }
+                SidebarAction::OpenBackgroundContextMenu { project_id } => {
+                    if let Err(err) = self.sidebar_open_background_context_menu(
+                        project_id.as_str(),
+                        event.coords.x,
+                        event.coords.y,
+                    ) {
+                        log::warn!("workspace background context menu failed: {:#}", err);
                     }
                     context.invalidate();
                 }
