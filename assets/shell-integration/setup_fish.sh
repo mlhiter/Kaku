@@ -790,8 +790,11 @@ end
 if not functions -q codex
     function codex
         if test (count $argv) -gt 0
-            command codex $argv
-            return $status
+            switch $argv[1]
+                case exec e review login logout mcp mcp-server app-server app completion sandbox debug apply a resume fork cloud features help --help -h --version -V
+                    command codex $argv
+                    return $status
+            end
         end
 
         set -l ws_url (__kaku_codex_managed_ws_url)

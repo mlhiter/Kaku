@@ -1261,8 +1261,12 @@ if ! (( \${+functions[codex]} )); then
         local ws_url server_pid exit_code
 
         if (( \$# > 0 )); then
-            command codex "\$@"
-            return \$?
+            case "\$1" in
+                exec|e|review|login|logout|mcp|mcp-server|app-server|app|completion|sandbox|debug|apply|a|resume|fork|cloud|features|help|--help|-h|--version|-V)
+                    command codex "\$@"
+                    return \$?
+                    ;;
+            esac
         fi
 
         ws_url="\$(_kaku_codex_managed_ws_url)"

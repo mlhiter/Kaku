@@ -63,7 +63,7 @@ impl TermWindow {
         let _ = pane_id;
     }
 
-    fn process_agent_events_for_pane(
+    pub(super) fn process_agent_events_for_pane(
         &mut self,
         pane_id: PaneId,
         events: Vec<AgentEvent>,

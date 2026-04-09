@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::http::Request as WsRequest;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use url::Url;
 use window::WindowOps;
@@ -22,15 +24,11 @@ const CODEX_APP_SERVER_RECONNECT_DELAY: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone)]
 pub(super) struct CodexAppServerLaunchContext {
     pub pane_id: PaneId,
-    pub project_id: String,
-    pub session_id: String,
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct CodexAppServerEvent {
     pane_id: PaneId,
-    project_id: String,
-    session_id: String,
     events: Vec<AgentEvent>,
 }
 
@@ -63,26 +61,13 @@ impl TermWindow {
             return false;
         }
 
-        let Some((project_id, session_id)) = self.sidebar_session_binding_for_pane(pane_id) else {
-            log::warn!(
-                "codex app-server start skipped: missing sidebar binding pane={} ws={}",
-                pane_id,
-                ws_url
-            );
-            return true;
-        };
-
         // Optional per-pane bearer token env key, emitted by managed wrappers.
         let token = user_vars
             .get("kaku_codex_app_server_token")
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
-        let context = CodexAppServerLaunchContext {
-            pane_id,
-            project_id,
-            session_id,
-        };
+        let context = CodexAppServerLaunchContext { pane_id };
         self.start_or_replace_codex_app_server_channel(context, ws_url.to_string(), token);
         true
     }
@@ -146,10 +131,8 @@ impl TermWindow {
         if event.events.is_empty() {
             return;
         }
-        self.process_agent_events_for_session(
+        self.process_agent_events_for_pane(
             event.pane_id,
-            event.project_id.as_str(),
-            event.session_id.as_str(),
             event.events,
             SessionStatusSource::Structured,
             SessionStatusConfidence::High,
@@ -213,13 +196,15 @@ async fn run_single_ws_session(
     request_id: &mut u64,
 ) -> Result<()> {
     let url = Url::parse(ws_url).with_context(|| format!("invalid ws url: {}", ws_url))?;
-    let mut request = WsRequest::builder().uri(url.as_str());
-    if let Some(token) = auth_token {
-        request = request.header("Authorization", format!("Bearer {token}"));
-    }
-    let request = request
-        .body(())
+    let mut request = url
+        .as_str()
+        .into_client_request()
         .context("build websocket request for codex app-server")?;
+    if let Some(token) = auth_token {
+        let header = HeaderValue::from_str(format!("Bearer {token}").as_str())
+            .context("invalid auth token header value")?;
+        request.headers_mut().insert(AUTHORIZATION, header);
+    }
 
     let connect = tokio::time::timeout(CODEX_APP_SERVER_CONNECT_TIMEOUT, connect_async(request))
         .await
@@ -297,8 +282,6 @@ async fn run_single_ws_session(
 
         let notify = CodexAppServerEvent {
             pane_id: context.pane_id,
-            project_id: context.project_id.clone(),
-            session_id: context.session_id.clone(),
             events,
         };
         let window = window.clone();
