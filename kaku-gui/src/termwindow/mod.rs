@@ -653,25 +653,14 @@ pub enum SidebarAction {
         env_id: String,
         is_global: bool,
     },
-    OpenBackgroundContextMenu {
-        project_id: String,
-    },
-    SetBackgroundImage {
-        project_id: String,
-    },
-    ClearBackgroundImage {
-        project_id: String,
-    },
+    OpenBackgroundContextMenu,
+    SetBackgroundImage,
+    ClearBackgroundImage,
     SetBackgroundFitMode {
-        project_id: String,
         fit_mode: String,
     },
-    SetBackgroundOverlay {
-        project_id: String,
-    },
-    ToggleBackgroundReadability {
-        project_id: String,
-    },
+    SetBackgroundOverlay,
+    ToggleBackgroundReadability,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

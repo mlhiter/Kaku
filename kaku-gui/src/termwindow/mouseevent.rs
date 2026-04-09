@@ -874,12 +874,10 @@ impl super::TermWindow {
                             log::warn!("workspace env context menu failed: {:#}", err);
                         }
                     }
-                    SidebarAction::OpenBackgroundContextMenu { project_id } => {
-                        if let Err(err) = self.sidebar_open_background_context_menu(
-                            project_id.as_str(),
-                            event.coords.x,
-                            event.coords.y,
-                        ) {
+                    SidebarAction::OpenBackgroundContextMenu => {
+                        if let Err(err) =
+                            self.sidebar_open_background_context_menu(event.coords.x, event.coords.y)
+                        {
                             log::warn!("workspace background context menu failed: {:#}", err);
                         }
                     }
@@ -992,12 +990,10 @@ impl super::TermWindow {
                     }
                     context.invalidate();
                 }
-                SidebarAction::OpenBackgroundContextMenu { project_id } => {
-                    if let Err(err) = self.sidebar_open_background_context_menu(
-                        project_id.as_str(),
-                        event.coords.x,
-                        event.coords.y,
-                    ) {
+                SidebarAction::OpenBackgroundContextMenu => {
+                    if let Err(err) =
+                        self.sidebar_open_background_context_menu(event.coords.x, event.coords.y)
+                    {
                         log::warn!("workspace background context menu failed: {:#}", err);
                     }
                     context.invalidate();

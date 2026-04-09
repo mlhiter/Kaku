@@ -39,12 +39,8 @@ enum RenameTarget {
         session_id: String,
     },
     CreateProject,
-    SetBackgroundImage {
-        project_id: String,
-    },
-    SetBackgroundOverlay {
-        project_id: String,
-    },
+    SetBackgroundImage,
+    SetBackgroundOverlay,
 }
 
 pub struct TabRenameModal {
@@ -178,7 +174,6 @@ impl TabRenameModal {
 
     pub fn new_set_background_image(
         term_window: &mut TermWindow,
-        project_id: String,
         current_path: String,
         anchor: UIItem,
     ) -> anyhow::Result<Self> {
@@ -186,7 +181,7 @@ impl TabRenameModal {
         let cursor = current_path.chars().count();
         let modal = Self {
             element: RefCell::new(None),
-            target: RenameTarget::SetBackgroundImage { project_id },
+            target: RenameTarget::SetBackgroundImage,
             style_tab_id,
             anchor,
             value: RefCell::new(current_path),
@@ -199,7 +194,6 @@ impl TabRenameModal {
 
     pub fn new_set_background_overlay(
         term_window: &mut TermWindow,
-        project_id: String,
         current_overlay: f32,
         anchor: UIItem,
     ) -> anyhow::Result<Self> {
@@ -208,7 +202,7 @@ impl TabRenameModal {
         let cursor = initial.chars().count();
         let modal = Self {
             element: RefCell::new(None),
-            target: RenameTarget::SetBackgroundOverlay { project_id },
+            target: RenameTarget::SetBackgroundOverlay,
             style_tab_id,
             anchor,
             value: RefCell::new(initial),
@@ -492,17 +486,16 @@ impl TabRenameModal {
                     term_window.show_toast("Failed to create project".to_string());
                 }
             }
-            RenameTarget::SetBackgroundImage { project_id } => {
-                if let Err(err) =
-                    term_window.sidebar_set_background_image_from_modal(project_id.as_str(), value.as_str())
+            RenameTarget::SetBackgroundImage => {
+                if let Err(err) = term_window.sidebar_set_background_image_from_modal(value.as_str())
                 {
                     log::warn!("set background image from modal failed: {:#}", err);
                     term_window.show_toast("Failed to set background image".to_string());
                 }
             }
-            RenameTarget::SetBackgroundOverlay { project_id } => {
-                if let Err(err) = term_window
-                    .sidebar_set_background_overlay_from_modal(project_id.as_str(), value.as_str())
+            RenameTarget::SetBackgroundOverlay => {
+                if let Err(err) =
+                    term_window.sidebar_set_background_overlay_from_modal(value.as_str())
                 {
                     log::warn!("set background overlay from modal failed: {:#}", err);
                     term_window.show_toast("Failed to set background overlay".to_string());
