@@ -2,16 +2,18 @@ mod ui;
 
 use crate::assistant_config;
 use crate::utils::open_path_in_editor;
-use anyhow::{Context, bail};
-use crossterm::ExecutableCommand;
+use anyhow::{bail, Context};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::Terminal;
+use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const KAKU_AUTO_COLOR_SCHEME_EXPR: &str = "(wezterm.gui and wezterm.gui.get_appearance() or 'Dark'):find('Dark') and 'Kaku Dark' or 'Kaku Light'";
@@ -25,6 +27,13 @@ enum NormalModeAction {
     MoveDown,
     StartEdit,
     Noop,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BackgroundImagePickerOutcome {
+    Selected,
+    Cancelled,
+    Unavailable,
 }
 
 pub fn run(config_path: PathBuf) -> anyhow::Result<()> {
@@ -107,7 +116,19 @@ fn run_app(
                     app.move_down();
                 }
                 NormalModeAction::StartEdit => {
-                    app.start_edit();
+                    if app.selected_field_uses_background_picker() {
+                        match with_terminal_suspended(terminal, || {
+                            app.pick_background_image_with_dialog()
+                        }) {
+                            Ok(BackgroundImagePickerOutcome::Selected)
+                            | Ok(BackgroundImagePickerOutcome::Cancelled) => {}
+                            Ok(BackgroundImagePickerOutcome::Unavailable) | Err(_) => {
+                                app.start_edit();
+                            }
+                        }
+                    } else {
+                        app.start_edit();
+                    }
                 }
                 NormalModeAction::Noop => {}
             },
@@ -174,12 +195,12 @@ fn normal_mode_action(key: KeyCode) -> NormalModeAction {
     }
 }
 
-fn with_terminal_suspended<F>(
+fn with_terminal_suspended<F, T>(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     func: F,
-) -> anyhow::Result<()>
+) -> anyhow::Result<T>
 where
-    F: FnOnce() -> anyhow::Result<()>,
+    F: FnOnce() -> anyhow::Result<T>,
 {
     disable_raw_mode().context("disable raw mode")?;
     let mut stdout = io::stdout();
@@ -199,7 +220,8 @@ where
         Ok(())
     })();
 
-    action_result.and(restore_result)
+    restore_result?;
+    action_result
 }
 
 pub(crate) fn ensure_editable_config_exists(config_path: Option<&Path>) -> anyhow::Result<PathBuf> {
@@ -927,6 +949,39 @@ impl App {
         self.dirty = true;
     }
 
+    fn selected_field_uses_background_picker(&self) -> bool {
+        self.fields
+            .get(self.selected)
+            .map(|field| field.lua_key == "window_background_image")
+            .unwrap_or(false)
+    }
+
+    fn pick_background_image_with_dialog(
+        &mut self,
+    ) -> anyhow::Result<BackgroundImagePickerOutcome> {
+        if !self.selected_field_uses_background_picker() {
+            return Ok(BackgroundImagePickerOutcome::Unavailable);
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            return Ok(BackgroundImagePickerOutcome::Unavailable);
+        }
+
+        let Some(selected_path) = pick_background_image_path_via_dialog()? else {
+            return Ok(BackgroundImagePickerOutcome::Cancelled);
+        };
+
+        let imported = import_background_image_asset(selected_path.as_str())?;
+        if self.fields[self.selected].value != imported {
+            self.fields[self.selected].value = imported;
+            self.fields[self.selected].skip_write = false;
+            self.dirty = true;
+        }
+
+        Ok(BackgroundImagePickerOutcome::Selected)
+    }
+
     fn confirm_select(&mut self) {
         let selected_option = self.fields[self.selected].options[self.select_index];
         let current_value = self.display_value(&self.fields[self.selected]).to_string();
@@ -1328,6 +1383,40 @@ fn signal_config_changed() {
     let _ = std::io::stdout().flush();
 }
 
+#[cfg(target_os = "macos")]
+fn pick_background_image_path_via_dialog() -> anyhow::Result<Option<String>> {
+    // Use native Finder picker for images and return POSIX path.
+    let script = r#"try
+set pickedFile to choose file with prompt "Select Background Image" of type {"public.image"}
+return POSIX path of pickedFile
+on error number -128
+return ""
+end try"#;
+
+    let output = Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .context("run osascript file picker")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("open background image picker failed: {stderr}");
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(selected))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pick_background_image_path_via_dialog() -> anyhow::Result<Option<String>> {
+    Ok(None)
+}
+
 fn background_assets_root() -> PathBuf {
     config::HOME_DIR
         .join(".kaku")
@@ -1400,8 +1489,8 @@ fn import_background_image_asset(raw: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, KAKU_AUTO_COLOR_SCHEME_EXPR, Mode, NormalModeAction, ensure_editable_config_exists,
-        normal_mode_action,
+        ensure_editable_config_exists, normal_mode_action, App, Mode, NormalModeAction,
+        KAKU_AUTO_COLOR_SCHEME_EXPR,
     };
     use crossterm::event::KeyCode;
     use std::path::PathBuf;
@@ -1765,6 +1854,27 @@ mod tests {
         app.fields[idx].value = "/tmp/bg.png".to_string();
 
         assert_eq!(app.to_lua_value(&app.fields[idx]), "'/tmp/bg.png'");
+    }
+
+    #[test]
+    fn only_background_image_field_uses_picker() {
+        let mut app = test_app();
+        let bg_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "window_background_image")
+            .expect("window_background_image field to exist");
+        let font_idx = app
+            .fields
+            .iter()
+            .position(|f| f.lua_key == "font")
+            .expect("font field to exist");
+
+        app.selected = bg_idx;
+        assert!(app.selected_field_uses_background_picker());
+
+        app.selected = font_idx;
+        assert!(!app.selected_field_uses_background_picker());
     }
 
     #[test]
