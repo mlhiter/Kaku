@@ -3,17 +3,17 @@ use crate::agent_status::events::{AgentEvent, SessionStatusConfidence, SessionSt
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use mux::pane::PaneId;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use url::Url;
 use window::WindowOps;
 
@@ -30,6 +30,7 @@ pub(super) struct CodexAppServerLaunchContext {
 pub(super) struct CodexAppServerEvent {
     pane_id: PaneId,
     events: Vec<AgentEvent>,
+    thread_id: Option<String>,
 }
 
 impl TermWindow {
@@ -128,6 +129,23 @@ impl TermWindow {
     }
 
     pub(super) fn handle_codex_app_server_event(&mut self, event: CodexAppServerEvent) {
+        if let Some(thread_id) = event.thread_id.as_deref() {
+            if let Some((project_id, session_id)) = self.sidebar_session_binding_for_pane(event.pane_id) {
+                if let Err(err) = self.sidebar_set_session_codex_thread_id(
+                    project_id.as_str(),
+                    session_id.as_str(),
+                    thread_id,
+                ) {
+                    log::warn!(
+                        "codex app-server: failed to persist thread id for {}/{}: {:#}",
+                        project_id,
+                        session_id,
+                        err
+                    );
+                }
+            }
+        }
+
         if event.events.is_empty() {
             return;
         }
@@ -148,7 +166,10 @@ fn spawn_codex_app_server_task(
     stop_flag: Arc<AtomicBool>,
 ) {
     std::thread::Builder::new()
-        .name(format!("codex-app-server-pane-{}", context.pane_id.as_usize()))
+        .name(format!(
+            "codex-app-server-pane-{}",
+            context.pane_id.as_usize()
+        ))
         .spawn(move || {
             let rt = TokioRuntimeBuilder::new_current_thread()
                 .enable_all()
@@ -224,11 +245,14 @@ async fn run_single_ws_session(
         }
     })
     .to_string();
-    ws_tx.send(WsMessage::Text(initialize_payload.into()))
+    ws_tx
+        .send(WsMessage::Text(initialize_payload.into()))
         .await
         .context("send initialize")?;
     ws_tx
-        .send(WsMessage::Text(json!({"method":"initialized"}).to_string().into()))
+        .send(WsMessage::Text(
+            json!({"method":"initialized"}).to_string().into(),
+        ))
         .await
         .context("send initialized")?;
 
@@ -261,7 +285,8 @@ async fn run_single_ws_session(
                         "result": response,
                     })
                     .to_string();
-                    ws_tx.send(WsMessage::Text(response_payload.into()))
+                    ws_tx
+                        .send(WsMessage::Text(response_payload.into()))
                         .await
                         .ok();
                 }
@@ -273,16 +298,18 @@ async fn run_single_ws_session(
             continue;
         };
         let params = payload.get("params");
+        let thread_id = extract_thread_id(params);
         let Some(events) = map_app_server_notification(method, params) else {
             continue;
         };
-        if events.is_empty() {
+        if events.is_empty() && thread_id.is_none() {
             continue;
         }
 
         let notify = CodexAppServerEvent {
             pane_id: context.pane_id,
             events,
+            thread_id,
         };
         let window = window.clone();
         window.notify(TermWindowNotif::Apply(Box::new(move |tw| {
@@ -311,6 +338,28 @@ fn handle_server_request(method: &str, _params: Option<&Value>) -> Option<Value>
         "execCommandApproval" => Some(json!({"decision":"cancel"})),
         _ => Some(json!({})),
     }
+}
+
+fn extract_thread_id(params: Option<&Value>) -> Option<String> {
+    let params = params?;
+    params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            params
+                .get("thread")
+                .and_then(|thread| thread.get("id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            params
+                .get("status")
+                .and_then(|status| status.get("threadId"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn map_app_server_notification(method: &str, params: Option<&Value>) -> Option<Vec<AgentEvent>> {
@@ -546,7 +595,7 @@ fn is_waiting_on_user_input_status(status: Option<&Value>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_app_server_notification, map_turn_completed};
+    use super::{extract_thread_id, map_app_server_notification, map_turn_completed};
     use crate::agent_status::events::AgentEvent;
     use serde_json::json;
 
@@ -590,5 +639,21 @@ mod tests {
                 reason: Some("boom".to_string()),
             }]
         );
+    }
+
+    #[test]
+    fn extracts_thread_id_from_standard_params_shape() {
+        let thread_id = extract_thread_id(Some(&json!({
+            "threadId": "thread_123"
+        })));
+        assert_eq!(thread_id.as_deref(), Some("thread_123"));
+    }
+
+    #[test]
+    fn extracts_thread_id_from_nested_thread_shape() {
+        let thread_id = extract_thread_id(Some(&json!({
+            "thread": {"id": "thread_456"}
+        })));
+        assert_eq!(thread_id.as_deref(), Some("thread_456"));
     }
 }

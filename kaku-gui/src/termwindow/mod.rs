@@ -32,6 +32,7 @@ use crate::termwindow::webgpu::WebGpuState;
 use ::wezterm_term::input::{ClickPosition, MouseButton as TMB};
 use ::window::*;
 use anyhow::{Context, anyhow, ensure};
+use chrono::{DateTime, Utc};
 use config::keyassignment::{
     Confirmation, KeyAssignment, LauncherActionArgs, PaneDirection, PaneEncoding, Pattern,
     PromptInputLine, QuickSelectArguments, RotationDirection, SpawnCommand, SplitSize,
@@ -921,6 +922,8 @@ pub struct WorkspaceSidebarSession {
     pub title: String,
     pub status: String,
     #[allow(dead_code)]
+    pub codex_thread_id: String,
+    #[allow(dead_code)]
     pub status_source: String,
     #[allow(dead_code)]
     pub status_confidence: String,
@@ -1060,6 +1063,8 @@ pub struct TermWindow {
     workspace_sidebar_pending_opens: VecDeque<WorkspaceSidebarPendingOpen>,
     workspace_sidebar_tab_to_session: HashMap<TabId, (String, String)>,
     workspace_sidebar_session_to_tab: HashMap<String, TabId>,
+    workspace_sidebar_restore_started_at: DateTime<Utc>,
+    workspace_sidebar_restore_pass_pending: bool,
     agent_status_manager: SessionStatusManager,
     agent_adapter_registry: AgentAdapterRegistry,
     pending_session_status_writes: HashMap<String, PendingSessionStatusWrite>,
@@ -1651,6 +1656,8 @@ impl TermWindow {
             workspace_sidebar_pending_opens: VecDeque::new(),
             workspace_sidebar_tab_to_session: HashMap::new(),
             workspace_sidebar_session_to_tab: HashMap::new(),
+            workspace_sidebar_restore_started_at: Utc::now(),
+            workspace_sidebar_restore_pass_pending: true,
             agent_status_manager: SessionStatusManager::default(),
             agent_adapter_registry: AgentAdapterRegistry::with_defaults(),
             pending_session_status_writes: HashMap::new(),

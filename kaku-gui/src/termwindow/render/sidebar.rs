@@ -11,17 +11,17 @@ use crate::termwindow::{
     SidebarAction, TermWindowNotif, UIItem, UIItemType, WorkspaceSidebarActionHit,
     WorkspaceSidebarPendingOpen, WorkspaceSidebarProject, WorkspaceSidebarSession,
 };
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use chrono::{DateTime, Utc};
 use config::{
-    keyassignment::{SpawnCommand, SpawnTabDomain},
     BackgroundSource,
+    keyassignment::{SpawnCommand, SpawnTabDomain},
 };
 use image::ImageReader;
+use mux::Mux;
 use mux::pane::{CachePolicy, PaneId};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
-use mux::Mux;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Write;
@@ -32,7 +32,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::surface::Line;
 use wezterm_term::color::ColorAttribute;
-use window::{color::LinearRgba, WindowOps};
+use window::{WindowOps, color::LinearRgba};
 
 const SIDEBAR_DEFAULT_WIDTH_PX: usize = 320;
 const SIDEBAR_MIN_WIDTH_PX: usize = 240;
@@ -47,6 +47,7 @@ const SIDEBAR_TEXT_TOP_PADDING: f32 = 12.0;
 const SIDEBAR_UI_STATE_RELATIVE_PATH: &str = "gui/sidebar.json";
 const SIDEBAR_MORE_BUTTON_WIDTH_PX: usize = 28;
 const SIDEBAR_MORE_BUTTON_RIGHT_PADDING_PX: usize = 8;
+const SIDEBAR_RECOVERY_MANUAL_RESUME_REASON: &str = "recover.manual_resume_required";
 
 static SIDEBAR_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -424,6 +425,8 @@ fn sidebar_status_spinner_frame(elapsed: Duration) -> char {
 struct SidebarSessionMeta {
     title: String,
     root_path: String,
+    codex_thread_id: String,
+    status_reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1009,6 +1012,43 @@ impl crate::TermWindow {
         Ok(())
     }
 
+    pub(crate) fn sidebar_set_session_codex_thread_id(
+        &mut self,
+        project_id: &str,
+        session_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<()> {
+        let normalized = thread_id.trim();
+        if normalized.is_empty() {
+            return Ok(());
+        }
+
+        let sessions_path = sidebar_state_root()
+            .join("projects")
+            .join(project_id)
+            .join("sessions.json");
+        if !sessions_path.exists() {
+            bail!("sessions file not found: {}", sessions_path.display());
+        }
+
+        let mut sessions_file: SessionsFile = read_json_file(&sessions_path)?;
+        let session = sessions_file
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| anyhow!("session not found in storage: {session_id}"))?;
+        if session.codex_thread_id.trim() == normalized {
+            return Ok(());
+        }
+
+        session.codex_thread_id = normalized.to_string();
+        session.updated_at = Utc::now().to_rfc3339();
+        write_json_file_atomic(&sessions_path, &sessions_file)?;
+
+        self.force_workspace_sidebar_refresh();
+        Ok(())
+    }
+
     fn sidebar_active_project_for_shortcuts(&mut self) -> Option<String> {
         if let Some((project_id, _)) = self.sidebar_active_project_and_session() {
             return Some(project_id);
@@ -1440,10 +1480,17 @@ impl crate::TermWindow {
             return;
         }
 
-        match self.load_workspace_sidebar_projects() {
+        let apply_restore_semantics = self.workspace_sidebar_restore_pass_pending;
+        match self.load_workspace_sidebar_projects(
+            apply_restore_semantics,
+            self.workspace_sidebar_restore_started_at,
+        ) {
             Ok(projects) => {
                 self.workspace_sidebar.projects = projects;
                 self.workspace_sidebar.last_load_error = None;
+                if apply_restore_semantics {
+                    self.workspace_sidebar_restore_pass_pending = false;
+                }
             }
             Err(err) => {
                 self.workspace_sidebar.last_load_error = Some(format!("{:#}", err));
@@ -1457,7 +1504,11 @@ impl crate::TermWindow {
         self.refresh_workspace_sidebar_if_needed();
     }
 
-    fn load_workspace_sidebar_projects(&self) -> anyhow::Result<Vec<WorkspaceSidebarProject>> {
+    fn load_workspace_sidebar_projects(
+        &self,
+        apply_restore_semantics: bool,
+        restore_started_at: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<WorkspaceSidebarProject>> {
         let root = sidebar_state_root();
         let projects_path = root.join("projects.json");
         if !projects_path.exists() {
@@ -1508,6 +1559,23 @@ impl crate::TermWindow {
                                 session.status_reason.clear();
                                 repaired = true;
                             }
+
+                            if apply_restore_semantics
+                                && should_reset_transient_status_for_restore(
+                                    session.status.as_str(),
+                                    session.updated_at.as_str(),
+                                    restore_started_at,
+                                )
+                            {
+                                session.status = SessionStatus::Idle.as_storage_str().to_string();
+                                session.status_source =
+                                    SessionStatusSource::Heuristic.as_storage_str().to_string();
+                                session.status_confidence =
+                                    SessionStatusConfidence::Low.as_storage_str().to_string();
+                                session.status_reason =
+                                    SIDEBAR_RECOVERY_MANUAL_RESUME_REASON.to_string();
+                                repaired = true;
+                            }
                         }
 
                         if repaired {
@@ -1526,6 +1594,7 @@ impl crate::TermWindow {
                                 id: session.id,
                                 title: session.title,
                                 status: session.status,
+                                codex_thread_id: session.codex_thread_id,
                                 status_source: session.status_source,
                                 status_confidence: session.status_confidence,
                                 status_reason: session.status_reason,
@@ -1702,6 +1771,16 @@ impl crate::TermWindow {
                     lines.push(
                         SidebarLine::new(detail_text, false).with_tone(SidebarLineTone::Warning),
                     );
+                } else if matches!(status, SidebarSessionStatus::Idle)
+                    && session.status_reason.as_str() == SIDEBAR_RECOVERY_MANUAL_RESUME_REASON
+                {
+                    lines.push(
+                        SidebarLine::new(
+                            "      restored: task is paused after restart; resume manually",
+                            false,
+                        )
+                        .with_tone(SidebarLineTone::Muted),
+                    );
                 } else if matches!(confidence, SessionStatusConfidence::Low)
                     && matches!(
                         status,
@@ -1861,7 +1940,10 @@ impl crate::TermWindow {
                         for entry in env_files.iter().take(8) {
                             let file_path = entry.path.to_string_lossy().into_owned();
                             lines.push(SidebarLine::action(
-                                format!("    > {}", truncate_middle(entry.name.as_str(), name_budget)),
+                                format!(
+                                    "    > {}",
+                                    truncate_middle(entry.name.as_str(), name_budget)
+                                ),
                                 SidebarAction::EditEnvFile {
                                     project_id: project_id.clone(),
                                     env_path: file_path.clone(),
@@ -2909,15 +2991,11 @@ read -r _
             self.sidebar_unbind_tab(tab_id);
         }
 
-        if self
-            .workspace_sidebar_pending_opens
-            .iter()
-            .any(|pending| {
-                pending.primary_binding
-                    && pending.project_id == project_id
-                    && pending.session_id == session_id
-            })
-        {
+        if self.workspace_sidebar_pending_opens.iter().any(|pending| {
+            pending.primary_binding
+                && pending.project_id == project_id
+                && pending.session_id == session_id
+        }) {
             return Ok(());
         }
 
@@ -2933,12 +3011,41 @@ read -r _
                 primary_binding: true,
             });
 
-        let spawn = SpawnCommand {
-            cwd: Some(PathBuf::from(session.root_path)),
-            domain: SpawnTabDomain::CurrentPaneDomain,
-            ..SpawnCommand::default()
+        let has_codex_thread = !session.codex_thread_id.trim().is_empty();
+        let is_restore_resume = session.status_reason.as_str() == SIDEBAR_RECOVERY_MANUAL_RESUME_REASON
+            && has_codex_thread;
+        let spawn = if has_codex_thread {
+            let quoted_thread = shlex::try_quote(session.codex_thread_id.trim())
+                .map(|value| value.into_owned())
+                .unwrap_or_else(|_| format!("'{}'", session.codex_thread_id.trim()));
+            let resume_command = format!("codex resume {quoted_thread}");
+            SpawnCommand {
+                label: Some(format!("resume {}", session.title)),
+                args: Some(vec![
+                    "sh".to_string(),
+                    "-lc".to_string(),
+                    resume_command,
+                ]),
+                cwd: Some(PathBuf::from(session.root_path)),
+                domain: SpawnTabDomain::CurrentPaneDomain,
+                ..SpawnCommand::default()
+            }
+        } else {
+            SpawnCommand {
+                cwd: Some(PathBuf::from(session.root_path)),
+                domain: SpawnTabDomain::CurrentPaneDomain,
+                ..SpawnCommand::default()
+            }
         };
         self.spawn_command(&spawn, SpawnWhere::NewTab);
+        if is_restore_resume {
+            self.show_toast("Resuming restored Codex session".to_string());
+        } else if has_codex_thread {
+            self.show_toast("Opening Codex session context".to_string());
+        } else if session.status_reason.as_str() == SIDEBAR_RECOVERY_MANUAL_RESUME_REASON
+        {
+            self.show_toast("No Codex thread id found; opened shell only".to_string());
+        }
         Ok(())
     }
 
@@ -2989,7 +3096,9 @@ read -r _
         }
 
         let key = sidebar_session_key(project_id, session_id);
-        self.workspace_sidebar_session_to_tab.entry(key).or_insert(tab_id);
+        self.workspace_sidebar_session_to_tab
+            .entry(key)
+            .or_insert(tab_id);
     }
 
     fn sidebar_session_meta(
@@ -3009,6 +3118,8 @@ read -r _
         Some(SidebarSessionMeta {
             title: session.title.clone(),
             root_path: project.root_path.clone(),
+            codex_thread_id: session.codex_thread_id.clone(),
+            status_reason: session.status_reason.clone(),
         })
     }
 
@@ -4493,6 +4604,30 @@ fn normalize_transient_session_status(
         .to_string()
 }
 
+fn should_reset_transient_status_for_restore(
+    status: &str,
+    updated_at: &str,
+    restore_started_at: DateTime<Utc>,
+) -> bool {
+    let Some(parsed_status) = SessionStatus::parse_storage(status) else {
+        return false;
+    };
+    if !matches!(
+        parsed_status,
+        SessionStatus::Loading | SessionStatus::NeedApprove | SessionStatus::Running
+    ) {
+        return false;
+    }
+
+    let parsed_updated_at = DateTime::parse_from_rfc3339(updated_at)
+        .map(|value| value.with_timezone(&Utc))
+        .ok();
+    match parsed_updated_at {
+        Some(timestamp) => timestamp <= restore_started_at,
+        None => true,
+    }
+}
+
 fn is_codex_command(command: &str) -> bool {
     shared_is_codex_like_command(command)
 }
@@ -4522,11 +4657,7 @@ fn is_stale_transient_session_status(status: &str, updated_at: &str, now: DateTi
 }
 
 fn pluralize_session(count: usize) -> &'static str {
-    if count == 1 {
-        "session"
-    } else {
-        "sessions"
-    }
+    if count == 1 { "session" } else { "sessions" }
 }
 
 fn schema_version() -> u8 {
@@ -4802,18 +4933,19 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_codex_command, is_codex_process_name, is_stale_transient_session_status,
-        normalize_transient_session_status, parse_env_assignment, parse_session_status_confidence,
-        parse_session_status_source, pick_project_for_cwd, pick_session_for_inferred_binding,
-        sidebar_action_needs_pointer_position, sidebar_background_color,
-        sidebar_next_session_title, sidebar_status_is_animating, sidebar_status_signal_tag,
-        sidebar_status_spinner_frame, SessionEntry, SidebarAction, SidebarLineTone,
-        SidebarSessionStatus, WorkspaceSidebarProject, WorkspaceSidebarSession,
+        SessionEntry, SidebarAction, SidebarLineTone, SidebarSessionStatus,
+        WorkspaceSidebarProject, WorkspaceSidebarSession, is_codex_command, is_codex_process_name,
+        is_stale_transient_session_status, normalize_transient_session_status,
+        parse_env_assignment, parse_session_status_confidence, parse_session_status_source,
+        pick_project_for_cwd, pick_session_for_inferred_binding,
+        should_reset_transient_status_for_restore, sidebar_action_needs_pointer_position,
+        sidebar_background_color, sidebar_next_session_title, sidebar_status_is_animating,
+        sidebar_status_signal_tag, sidebar_status_spinner_frame,
     };
     use crate::agent_status::events::{
         SessionStatus, SessionStatusConfidence, SessionStatusSource,
     };
-    use chrono::Utc;
+    use chrono::{DateTime, Utc};
     use std::collections::HashSet;
     use std::path::Path;
     use window::color::LinearRgba;
@@ -5095,6 +5227,7 @@ mod tests {
                     id: "sess-1".to_string(),
                     title: "session-1".to_string(),
                     status: SessionStatus::Idle.as_storage_str().to_string(),
+                    codex_thread_id: String::new(),
                     status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
                     status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
                     status_reason: String::new(),
@@ -5105,6 +5238,7 @@ mod tests {
                     id: "sess-2".to_string(),
                     title: "session-2".to_string(),
                     status: SessionStatus::Idle.as_storage_str().to_string(),
+                    codex_thread_id: String::new(),
                     status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
                     status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
                     status_reason: String::new(),
@@ -5132,6 +5266,7 @@ mod tests {
                     id: "sess-old".to_string(),
                     title: "old".to_string(),
                     status: SessionStatus::Idle.as_storage_str().to_string(),
+                    codex_thread_id: String::new(),
                     status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
                     status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
                     status_reason: String::new(),
@@ -5142,6 +5277,7 @@ mod tests {
                     id: "sess-new".to_string(),
                     title: "new".to_string(),
                     status: SessionStatus::Idle.as_storage_str().to_string(),
+                    codex_thread_id: String::new(),
                     status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
                     status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
                     status_reason: String::new(),
@@ -5167,6 +5303,7 @@ mod tests {
                     id: "sess-stale-running".to_string(),
                     title: "old-running".to_string(),
                     status: SessionStatus::Running.as_storage_str().to_string(),
+                    codex_thread_id: String::new(),
                     status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
                     status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
                     status_reason: String::new(),
@@ -5177,6 +5314,7 @@ mod tests {
                     id: "sess-idle".to_string(),
                     title: "idle".to_string(),
                     status: SessionStatus::Idle.as_storage_str().to_string(),
+                    codex_thread_id: String::new(),
                     status_source: SessionStatusSource::Heuristic.as_storage_str().to_string(),
                     status_confidence: SessionStatusConfidence::Low.as_storage_str().to_string(),
                     status_reason: String::new(),
@@ -5199,6 +5337,35 @@ mod tests {
             Utc::now(),
         );
         assert_eq!(normalized, SessionStatus::Idle.as_storage_str());
+    }
+
+    #[test]
+    fn resets_recovered_transient_status_when_timestamp_is_before_window_start() {
+        let restore_started_at = DateTime::parse_from_rfc3339("2026-04-10T09:00:00Z")
+            .expect("parse restore timestamp")
+            .with_timezone(&Utc);
+        assert!(should_reset_transient_status_for_restore(
+            SessionStatus::Running.as_storage_str(),
+            "2026-04-10T08:59:59Z",
+            restore_started_at,
+        ));
+        assert!(should_reset_transient_status_for_restore(
+            SessionStatus::NeedApprove.as_storage_str(),
+            "",
+            restore_started_at,
+        ));
+    }
+
+    #[test]
+    fn keeps_runtime_transient_status_when_timestamp_is_after_window_start() {
+        let restore_started_at = DateTime::parse_from_rfc3339("2026-04-10T09:00:00Z")
+            .expect("parse restore timestamp")
+            .with_timezone(&Utc);
+        assert!(!should_reset_transient_status_for_restore(
+            SessionStatus::Loading.as_storage_str(),
+            "2026-04-10T09:00:01Z",
+            restore_started_at,
+        ));
     }
 
     #[test]
