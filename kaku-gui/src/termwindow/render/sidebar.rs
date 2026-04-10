@@ -11,14 +11,17 @@ use crate::termwindow::{
     SidebarAction, TermWindowNotif, UIItem, UIItemType, WorkspaceSidebarActionHit,
     WorkspaceSidebarPendingOpen, WorkspaceSidebarProject, WorkspaceSidebarSession,
 };
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, Utc};
-use config::keyassignment::{SpawnCommand, SpawnTabDomain};
+use config::{
+    keyassignment::{SpawnCommand, SpawnTabDomain},
+    BackgroundSource,
+};
 use image::ImageReader;
-use mux::Mux;
 use mux::pane::{CachePolicy, PaneId};
 use mux::renderable::{RenderableDimensions, StableCursorPosition};
 use mux::tab::TabId;
+use mux::Mux;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Write;
@@ -29,7 +32,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::surface::Line;
 use wezterm_term::color::ColorAttribute;
-use window::{WindowOps, color::LinearRgba};
+use window::{color::LinearRgba, WindowOps};
 
 const SIDEBAR_DEFAULT_WIDTH_PX: usize = 320;
 const SIDEBAR_MIN_WIDTH_PX: usize = 240;
@@ -436,8 +439,14 @@ struct SidebarEnvDisplayEntry {
     id: String,
     key: String,
     value: String,
-    is_global: bool,
     source_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct SidebarEnvFileDisplayEntry {
+    name: String,
+    path: PathBuf,
+    is_global: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -667,6 +676,15 @@ impl crate::TermWindow {
                 project_id,
                 is_global,
             } => self.sidebar_request_create_env_var(project_id.as_str(), is_global),
+            SidebarAction::EditEnvFile {
+                project_id,
+                env_path,
+                is_global,
+            } => self.sidebar_request_edit_env_file(
+                project_id.as_str(),
+                env_path.as_str(),
+                is_global,
+            ),
             SidebarAction::InsertEnvVar {
                 project_id,
                 env_id,
@@ -690,7 +708,9 @@ impl crate::TermWindow {
                 self.sidebar_set_background_fit_mode(fit_mode.as_str())
             }
             SidebarAction::SetBackgroundOverlay => self.sidebar_request_set_background_overlay(),
-            SidebarAction::ToggleBackgroundReadability => self.sidebar_toggle_background_readability(),
+            SidebarAction::ToggleBackgroundReadability => {
+                self.sidebar_toggle_background_readability()
+            }
         }
     }
 
@@ -699,15 +719,25 @@ impl crate::TermWindow {
             return;
         };
 
-        self.sidebar_bind_session_to_tab(
-            pending.project_id.as_str(),
-            pending.session_id.as_str(),
-            tab_id,
-        );
+        if pending.primary_binding {
+            self.sidebar_bind_session_to_tab(
+                pending.project_id.as_str(),
+                pending.session_id.as_str(),
+                tab_id,
+            );
+        } else {
+            self.sidebar_bind_session_tab_aux(
+                pending.project_id.as_str(),
+                pending.session_id.as_str(),
+                tab_id,
+            );
+        }
 
         let mux = Mux::get();
         if let Some(tab) = mux.get_tab(tab_id) {
-            tab.set_title(pending.session_title.as_str());
+            if !pending.session_title.is_empty() {
+                tab.set_title(pending.session_title.as_str());
+            }
         }
     }
 
@@ -715,11 +745,10 @@ impl crate::TermWindow {
         if let Some((project_id, session_id)) =
             self.workspace_sidebar_tab_to_session.remove(&tab_id)
         {
-            self.workspace_sidebar_session_to_tab
-                .remove(&sidebar_session_key(
-                    project_id.as_str(),
-                    session_id.as_str(),
-                ));
+            let key = sidebar_session_key(project_id.as_str(), session_id.as_str());
+            if self.workspace_sidebar_session_to_tab.get(&key).copied() == Some(tab_id) {
+                self.workspace_sidebar_session_to_tab.remove(&key);
+            }
         }
     }
 
@@ -776,8 +805,7 @@ impl crate::TermWindow {
             .get_current_working_dir(CachePolicy::FetchImmediate)
             .or_else(|| pane.get_current_working_dir(CachePolicy::AllowStale))
             .and_then(|url| url.to_file_path().ok())
-            .or_else(|| std::env::current_dir().ok())
-            .or_else(|| Some(config::HOME_DIR.clone()))?;
+            .filter(|path| path.is_absolute())?;
         let mut project_id = pick_project_for_cwd(&self.workspace_sidebar.projects, cwd.as_path())
             .map(|project| project.id.clone());
         if project_id.is_none() {
@@ -1083,14 +1111,31 @@ impl crate::TermWindow {
         self.refresh_workspace_sidebar_if_needed();
 
         let palette = self.palette().clone();
+        let has_window_background_image = self
+            .window_background
+            .iter()
+            .any(|layer| matches!(layer.def.source, BackgroundSource::File(_)));
         let panel_bg = sidebar_background_color(
             palette
                 .resolve_bg(ColorAttribute::Default)
                 .to_linear()
                 .mul_alpha(self.config.window_background_opacity),
+            has_window_background_image,
         );
         let panel_border = sidebar_border_color(palette.foreground.to_linear());
         let text_color = palette.foreground.to_linear();
+
+        if y > 0.0 {
+            self.filled_rectangle(layers, 0, euclid::rect(x, 0.0, width, y), panel_bg)
+                .context("paint sidebar top cap")?;
+            self.filled_rectangle(
+                layers,
+                1,
+                euclid::rect((x + width - 1.0).max(0.0), 0.0, 1.0, y),
+                panel_border,
+            )
+            .context("paint sidebar top cap border")?;
+        }
 
         self.filled_rectangle(layers, 0, euclid::rect(x, y, width, height), panel_bg)
             .context("paint sidebar background")?;
@@ -1691,7 +1736,7 @@ impl crate::TermWindow {
             );
 
             lines.push(
-                SidebarLine::new("  Snippets", false)
+                SidebarLine::new("Snippets", false)
                     .with_tone(SidebarLineTone::Info)
                     .with_trailing_button(
                         "+",
@@ -1792,7 +1837,7 @@ impl crate::TermWindow {
 
             lines.push(
                 SidebarLine::action(
-                    "  Env (file-based)",
+                    "Env Files",
                     SidebarAction::OpenEnvSectionContextMenu {
                         project_id: project_id.clone(),
                     },
@@ -1805,99 +1850,24 @@ impl crate::TermWindow {
                     },
                 ),
             );
-            match self.sidebar_discover_project_env_files(project_id.as_str()) {
-                Ok(project_env_files) => {
-                    if project_env_files.is_empty() {
-                        lines.push(
-                            SidebarLine::new("    project files: (none)", false)
-                                .with_tone(SidebarLineTone::Muted),
-                        );
-                    } else {
-                        for path in project_env_files.iter().take(3) {
-                            let label = path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or(".env");
-                            lines.push(
-                                SidebarLine::new(format!("    file: {label}"), false)
-                                    .with_tone(SidebarLineTone::Muted),
-                            );
-                        }
-                    }
-                }
-                Err(err) => {
-                    lines.push(
-                        SidebarLine::new(
-                            format!(
-                                "    env file scan error: {}",
-                                truncate_middle(
-                                    format!("{err:#}").as_str(),
-                                    line_char_budget.saturating_sub(8)
-                                )
-                            ),
-                            false,
-                        )
-                        .with_tone(SidebarLineTone::Warning),
-                    );
-                }
-            }
-            match self.sidebar_load_env_entries(project_id.as_str()) {
-                Ok(entries) => {
-                    if entries.is_empty() {
+            match self.sidebar_load_env_files(project_id.as_str()) {
+                Ok(env_files) => {
+                    if env_files.is_empty() {
                         lines.push(
                             SidebarLine::new("    (none)", false).with_tone(SidebarLineTone::Muted),
                         );
                     } else {
-                        for entry in entries.iter().take(8) {
-                            let scope_tag = if entry.is_global { "G" } else { "P" };
-                            let key_budget = line_char_budget.saturating_sub(16).max(12);
-                            let value_budget = line_char_budget.saturating_sub(20).max(12);
-                            let source_name = entry
-                                .source_path
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or("env");
-                            lines.push(
-                                SidebarLine::action(
-                                    format!(
-                                        "    [{scope_tag}] {}",
-                                        truncate_middle(entry.key.as_str(), key_budget)
-                                    ),
-                                    SidebarAction::InsertEnvVar {
-                                        project_id: project_id.clone(),
-                                        env_id: entry.id.clone(),
-                                        is_global: entry.is_global,
-                                    },
-                                )
-                                .with_trailing_button(
-                                    "⋯",
-                                    SidebarAction::OpenEnvContextMenu {
-                                        project_id: project_id.clone(),
-                                        env_id: entry.id.clone(),
-                                        is_global: entry.is_global,
-                                    },
-                                ),
-                            );
-                            lines.push(
-                                SidebarLine::new(
-                                    format!(
-                                        "      = {}",
-                                        truncate_middle(entry.value.as_str(), value_budget)
-                                    ),
-                                    false,
-                                )
-                                .with_tone(SidebarLineTone::Muted),
-                            );
-                            lines.push(
-                                SidebarLine::new(
-                                    format!(
-                                        "      @ {}",
-                                        truncate_middle(source_name, value_budget)
-                                    ),
-                                    false,
-                                )
-                                .with_tone(SidebarLineTone::Muted),
-                            );
+                        let name_budget = line_char_budget.saturating_sub(8).max(16);
+                        for entry in env_files.iter().take(8) {
+                            let file_path = entry.path.to_string_lossy().into_owned();
+                            lines.push(SidebarLine::action(
+                                format!("    > {}", truncate_middle(entry.name.as_str(), name_budget)),
+                                SidebarAction::EditEnvFile {
+                                    project_id: project_id.clone(),
+                                    env_path: file_path.clone(),
+                                    is_global: entry.is_global,
+                                },
+                            ));
                         }
                     }
                 }
@@ -1939,6 +1909,21 @@ impl crate::TermWindow {
     }
 
     fn sidebar_request_create_project(&mut self) -> anyhow::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            match pick_project_root_path_via_dialog() {
+                Ok(Some(path)) => return self.sidebar_create_project_with_root_path(path.as_str()),
+                Ok(None) => return Ok(()),
+                Err(err) => {
+                    log::warn!(
+                        "project folder picker failed, falling back to manual input: {:#}",
+                        err
+                    );
+                    self.show_toast("Folder picker unavailable. Enter path manually.".to_string());
+                }
+            }
+        }
+
         self.sidebar_open_create_project_modal()
     }
 
@@ -2015,16 +2000,15 @@ impl crate::TermWindow {
         projects_file.projects.push(project);
         write_json_file_atomic(&projects_path, &projects_file)?;
 
-        let sessions_path = sidebar_state_root()
-            .join("projects")
-            .join(project_id)
-            .join("sessions.json");
-        if !sessions_path.exists() {
-            write_json_file_atomic(&sessions_path, &SessionsFile::default())?;
-        }
-
+        let session_id = ensure_sidebar_project_has_session(project_id.as_str())?;
         self.force_workspace_sidebar_refresh();
-        self.show_toast(format!("Created project \"{}\".", project_name));
+        self.sidebar_activate_session(project_id.as_str(), session_id.as_str())?;
+        let session_title =
+            self.sidebar_session_display_name(project_id.as_str(), session_id.as_str());
+        self.show_toast(format!(
+            "Created project \"{}\" and opened \"{}\".",
+            project_name, session_title
+        ));
         Ok(())
     }
 
@@ -2040,7 +2024,10 @@ impl crate::TermWindow {
         self.sidebar_load_snippet_files_from_dir(&sidebar_global_snippets_dir(), true)
     }
 
-    fn sidebar_maybe_migrate_legacy_project_snippets(&self, project_id: &str) -> anyhow::Result<()> {
+    fn sidebar_maybe_migrate_legacy_project_snippets(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<()> {
         let legacy_path = sidebar_project_snippets_path(project_id);
         if !legacy_path.exists() {
             return Ok(());
@@ -2193,6 +2180,15 @@ read -r _
             domain: SpawnTabDomain::CurrentPaneDomain,
             ..SpawnCommand::default()
         };
+        if let Some((project_id, session_id)) = self.sidebar_active_project_and_session() {
+            self.workspace_sidebar_pending_opens
+                .push_back(WorkspaceSidebarPendingOpen {
+                    project_id,
+                    session_id,
+                    session_title: String::new(),
+                    primary_binding: false,
+                });
+        }
         self.spawn_command(&spawn, SpawnWhere::NewTab);
         Ok(())
     }
@@ -2234,20 +2230,14 @@ read -r _
         let cwd = if entry.is_global {
             Some(config::HOME_DIR.as_path())
         } else {
-            project_root
-                .as_deref()
-                .or(Some(config::HOME_DIR.as_path()))
+            project_root.as_deref().or(Some(config::HOME_DIR.as_path()))
         };
         self.sidebar_open_file_in_editor_tab(&entry.path, cwd, "Edit Snippet")?;
         self.show_toast("Snippet opened in editor tab".to_string());
         Ok(())
     }
 
-    fn sidebar_insert_snippet(
-        &mut self,
-        project_id: &str,
-        snippet_id: &str,
-    ) -> anyhow::Result<()> {
+    fn sidebar_insert_snippet(&mut self, project_id: &str, snippet_id: &str) -> anyhow::Result<()> {
         let entry = self.sidebar_snippet_entry(project_id, snippet_id)?;
         let content = std::fs::read_to_string(&entry.path)
             .with_context(|| format!("read {}", entry.path.display()))?;
@@ -2259,13 +2249,10 @@ read -r _
         Ok(())
     }
 
-    fn sidebar_delete_snippet(
-        &mut self,
-        project_id: &str,
-        snippet_id: &str,
-    ) -> anyhow::Result<()> {
+    fn sidebar_delete_snippet(&mut self, project_id: &str, snippet_id: &str) -> anyhow::Result<()> {
         let entry = self.sidebar_snippet_entry(project_id, snippet_id)?;
-        std::fs::remove_file(&entry.path).with_context(|| format!("delete {}", entry.path.display()))?;
+        std::fs::remove_file(&entry.path)
+            .with_context(|| format!("delete {}", entry.path.display()))?;
         self.force_workspace_sidebar_refresh();
         self.show_toast(format!("Deleted snippet \"{}\".", entry.name));
         Ok(())
@@ -2279,12 +2266,12 @@ read -r _
 
         let mut entries = Vec::new();
         for path in self.sidebar_discover_project_env_files(project_id)? {
-            entries.extend(self.sidebar_load_env_entries_from_file(&path, false)?);
+            entries.extend(self.sidebar_load_env_entries_from_file(&path)?);
         }
 
         let global_env_file = sidebar_global_env_file_path();
         if global_env_file.exists() {
-            entries.extend(self.sidebar_load_env_entries_from_file(&global_env_file, true)?);
+            entries.extend(self.sidebar_load_env_entries_from_file(&global_env_file)?);
         }
 
         Ok(entries)
@@ -2367,10 +2354,46 @@ read -r _
         Ok(files)
     }
 
+    fn sidebar_load_env_files(
+        &self,
+        project_id: &str,
+    ) -> anyhow::Result<Vec<SidebarEnvFileDisplayEntry>> {
+        self.sidebar_maybe_migrate_legacy_env_files(project_id)?;
+
+        let mut files = Vec::new();
+        for path in self.sidebar_discover_project_env_files(project_id)? {
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(".env")
+                .to_string();
+            files.push(SidebarEnvFileDisplayEntry {
+                name,
+                path,
+                is_global: false,
+            });
+        }
+
+        let global_path = sidebar_global_env_file_path();
+        if global_path.is_file() {
+            let name = global_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("global.env")
+                .to_string();
+            files.push(SidebarEnvFileDisplayEntry {
+                name,
+                path: global_path,
+                is_global: true,
+            });
+        }
+
+        Ok(files)
+    }
+
     fn sidebar_load_env_entries_from_file(
         &self,
         path: &Path,
-        is_global: bool,
     ) -> anyhow::Result<Vec<SidebarEnvDisplayEntry>> {
         if !path.exists() {
             return Ok(Vec::new());
@@ -2401,7 +2424,6 @@ read -r _
                 id: encode_env_entry_id(path, key, line_idx),
                 key: key.to_string(),
                 value: value.trim().to_string(),
-                is_global,
                 source_path: path.to_path_buf(),
             });
         }
@@ -2420,10 +2442,7 @@ read -r _
             .ok_or_else(|| anyhow!("env var not found: {project_id}/{env_id}"))
     }
 
-    fn sidebar_primary_project_env_file_path(
-        &self,
-        project_id: &str,
-    ) -> anyhow::Result<PathBuf> {
+    fn sidebar_primary_project_env_file_path(&self, project_id: &str) -> anyhow::Result<PathBuf> {
         let discovered = self.sidebar_discover_project_env_files(project_id)?;
         if let Some(path) = discovered.into_iter().next() {
             return Ok(path);
@@ -2458,12 +2477,39 @@ read -r _
         let cwd = if is_global {
             Some(config::HOME_DIR.as_path())
         } else {
-            project_root
-                .as_deref()
-                .or(Some(config::HOME_DIR.as_path()))
+            project_root.as_deref().or(Some(config::HOME_DIR.as_path()))
         };
         self.sidebar_open_file_in_editor_tab(
             &path,
+            cwd,
+            if is_global {
+                "Edit Env File (Global)"
+            } else {
+                "Edit Env File (Project)"
+            },
+        )?;
+        self.show_toast("Env file opened in editor tab".to_string());
+        Ok(())
+    }
+
+    fn sidebar_request_edit_env_file(
+        &mut self,
+        project_id: &str,
+        env_path: &str,
+        is_global: bool,
+    ) -> anyhow::Result<()> {
+        let path = PathBuf::from(env_path);
+        let project_root = self.sidebar_project_root_path(project_id);
+        let cwd = if is_global {
+            Some(config::HOME_DIR.as_path())
+        } else {
+            project_root
+                .as_deref()
+                .or_else(|| path.parent())
+                .or(Some(config::HOME_DIR.as_path()))
+        };
+        self.sidebar_open_file_in_editor_tab(
+            path.as_path(),
             cwd,
             if is_global {
                 "Edit Env File (Global)"
@@ -2486,9 +2532,7 @@ read -r _
         let cwd = if is_global {
             Some(config::HOME_DIR.as_path())
         } else {
-            project_root
-                .as_deref()
-                .or(Some(config::HOME_DIR.as_path()))
+            project_root.as_deref().or(Some(config::HOME_DIR.as_path()))
         };
         self.sidebar_open_file_in_editor_tab(&entry.source_path, cwd, "Edit Env File")?;
         self.show_toast("Env file opened in editor tab".to_string());
@@ -2868,7 +2912,11 @@ read -r _
         if self
             .workspace_sidebar_pending_opens
             .iter()
-            .any(|pending| pending.project_id == project_id && pending.session_id == session_id)
+            .any(|pending| {
+                pending.primary_binding
+                    && pending.project_id == project_id
+                    && pending.session_id == session_id
+            })
         {
             return Ok(());
         }
@@ -2882,6 +2930,7 @@ read -r _
                 project_id: project_id.to_string(),
                 session_id: session_id.to_string(),
                 session_title: session.title.clone(),
+                primary_binding: true,
             });
 
         let spawn = SpawnCommand {
@@ -2912,11 +2961,10 @@ read -r _
             .workspace_sidebar_tab_to_session
             .insert(tab_id, (project_id.to_string(), session_id.to_string()))
         {
-            self.workspace_sidebar_session_to_tab
-                .remove(&sidebar_session_key(
-                    old_project.as_str(),
-                    old_session.as_str(),
-                ));
+            let old_key = sidebar_session_key(old_project.as_str(), old_session.as_str());
+            if self.workspace_sidebar_session_to_tab.get(&old_key).copied() == Some(tab_id) {
+                self.workspace_sidebar_session_to_tab.remove(&old_key);
+            }
         }
 
         let key = sidebar_session_key(project_id, session_id);
@@ -2925,6 +2973,23 @@ read -r _
                 self.workspace_sidebar_tab_to_session.remove(&old_tab_id);
             }
         }
+    }
+
+    fn sidebar_bind_session_tab_aux(&mut self, project_id: &str, session_id: &str, tab_id: TabId) {
+        self.prune_workspace_sidebar_tab_bindings();
+
+        if let Some((old_project, old_session)) = self
+            .workspace_sidebar_tab_to_session
+            .insert(tab_id, (project_id.to_string(), session_id.to_string()))
+        {
+            let old_key = sidebar_session_key(old_project.as_str(), old_session.as_str());
+            if self.workspace_sidebar_session_to_tab.get(&old_key).copied() == Some(tab_id) {
+                self.workspace_sidebar_session_to_tab.remove(&old_key);
+            }
+        }
+
+        let key = sidebar_session_key(project_id, session_id);
+        self.workspace_sidebar_session_to_tab.entry(key).or_insert(tab_id);
     }
 
     fn sidebar_session_meta(
@@ -3329,10 +3394,7 @@ read -r _
                 "Set Background Image Path",
                 SidebarAction::SetBackgroundImage,
             ),
-            SidebarContextMenuItem::new(
-                "Set Overlay Alpha",
-                SidebarAction::SetBackgroundOverlay,
-            ),
+            SidebarContextMenuItem::new("Set Overlay Alpha", SidebarAction::SetBackgroundOverlay),
             SidebarContextMenuItem::new(
                 if fit_mode == "fill" {
                     "Fit: Fill (active)"
@@ -3922,7 +3984,9 @@ fn sidebar_global_env_path() -> PathBuf {
 }
 
 fn sidebar_global_env_file_path() -> PathBuf {
-    sidebar_global_resources_root().join("env").join("global.env")
+    sidebar_global_resources_root()
+        .join("env")
+        .join("global.env")
 }
 
 fn sidebar_project_managed_env_file_path(project_id: &str) -> PathBuf {
@@ -4035,7 +4099,8 @@ fn append_env_entries_to_file(path: &Path, entries: &[EnvVarEntry]) -> anyhow::R
 }
 
 fn remove_env_key_from_file(path: &Path, key: &str) -> anyhow::Result<bool> {
-    let content = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let had_trailing_newline = content.ends_with('\n');
     let mut removed = false;
     let mut kept_lines: Vec<&str> = Vec::new();
@@ -4457,7 +4522,11 @@ fn is_stale_transient_session_status(status: &str, updated_at: &str, now: DateTi
 }
 
 fn pluralize_session(count: usize) -> &'static str {
-    if count == 1 { "session" } else { "sessions" }
+    if count == 1 {
+        "session"
+    } else {
+        "sessions"
+    }
 }
 
 fn schema_version() -> u8 {
@@ -4562,6 +4631,34 @@ fn normalize_root_path(path: &Path) -> anyhow::Result<String> {
     Ok(normalized.to_string_lossy().into_owned())
 }
 
+#[cfg(target_os = "macos")]
+fn pick_project_root_path_via_dialog() -> anyhow::Result<Option<String>> {
+    let script = r#"try
+set pickedFolder to choose folder with prompt "Select Project Folder"
+return POSIX path of pickedFolder
+on error number -128
+return ""
+end try"#;
+
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .context("run osascript folder picker")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!("open project folder picker failed: {stderr}");
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(selected))
+    }
+}
+
 fn generate_sidebar_id(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4624,21 +4721,29 @@ fn truncate_middle(input: &str, max_chars: usize) -> String {
     format!("{head}...{tail}")
 }
 
-fn sidebar_background_color(background: LinearRgba) -> LinearRgba {
+fn sidebar_background_color(
+    background: LinearRgba,
+    has_window_background_image: bool,
+) -> LinearRgba {
+    let panel_alpha = if has_window_background_image {
+        0.80
+    } else {
+        0.97
+    };
     let luminance = 0.299 * background.0 + 0.587 * background.1 + 0.114 * background.2;
     if luminance > 0.5 {
         LinearRgba(
             (background.0 * 0.92).clamp(0.0, 1.0),
             (background.1 * 0.92).clamp(0.0, 1.0),
             (background.2 * 0.92).clamp(0.0, 1.0),
-            0.97,
+            panel_alpha,
         )
     } else {
         LinearRgba(
             (background.0 + 0.08).clamp(0.0, 1.0),
             (background.1 + 0.08).clamp(0.0, 1.0),
             (background.2 + 0.08).clamp(0.0, 1.0),
-            0.97,
+            panel_alpha,
         )
     }
 }
@@ -4697,13 +4802,13 @@ fn mix_linear(base: LinearRgba, target: LinearRgba, factor: f32) -> LinearRgba {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionEntry, SidebarAction, SidebarLineTone, SidebarSessionStatus,
-        WorkspaceSidebarProject, WorkspaceSidebarSession, is_codex_command, is_codex_process_name,
-        is_stale_transient_session_status, normalize_transient_session_status,
-        parse_env_assignment, parse_session_status_confidence, parse_session_status_source,
-        pick_project_for_cwd, pick_session_for_inferred_binding,
-        sidebar_action_needs_pointer_position, sidebar_next_session_title,
-        sidebar_status_is_animating, sidebar_status_signal_tag, sidebar_status_spinner_frame,
+        is_codex_command, is_codex_process_name, is_stale_transient_session_status,
+        normalize_transient_session_status, parse_env_assignment, parse_session_status_confidence,
+        parse_session_status_source, pick_project_for_cwd, pick_session_for_inferred_binding,
+        sidebar_action_needs_pointer_position, sidebar_background_color,
+        sidebar_next_session_title, sidebar_status_is_animating, sidebar_status_signal_tag,
+        sidebar_status_spinner_frame, SessionEntry, SidebarAction, SidebarLineTone,
+        SidebarSessionStatus, WorkspaceSidebarProject, WorkspaceSidebarSession,
     };
     use crate::agent_status::events::{
         SessionStatus, SessionStatusConfidence, SessionStatusSource,
@@ -4711,6 +4816,7 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashSet;
     use std::path::Path;
+    use window::color::LinearRgba;
 
     #[test]
     fn parses_session_status_aliases() {
@@ -4768,6 +4874,16 @@ mod tests {
             assert_eq!(status.badge(), expected_badge);
             assert_eq!(status.tone(), expected_tone);
         }
+    }
+
+    #[test]
+    fn sidebar_panel_is_more_transparent_when_background_image_is_present() {
+        let base = LinearRgba(0.10, 0.12, 0.16, 1.0);
+        let without_image = sidebar_background_color(base, false);
+        let with_image = sidebar_background_color(base, true);
+        assert!(with_image.3 < without_image.3);
+        assert_eq!(without_image.3, 0.97);
+        assert_eq!(with_image.3, 0.80);
     }
 
     #[test]

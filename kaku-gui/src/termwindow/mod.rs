@@ -633,6 +633,11 @@ pub enum SidebarAction {
         project_id: String,
         is_global: bool,
     },
+    EditEnvFile {
+        project_id: String,
+        env_path: String,
+        is_global: bool,
+    },
     InsertEnvVar {
         project_id: String,
         env_id: String,
@@ -954,6 +959,7 @@ pub struct WorkspaceSidebarPendingOpen {
     pub project_id: String,
     pub session_id: String,
     pub session_title: String,
+    pub primary_binding: bool,
 }
 
 pub struct TermWindow {
